@@ -1,3 +1,5 @@
+import os
+from dotenv import load_dotenv
 import streamlit as st
 import requests
 import traceback
@@ -8,19 +10,25 @@ from linkup import LinkupClient
 
 # ==============================================================================
 # ==============================================================================
-# 🛠️ KEYS (Now loading securely from the Server)
 # ==============================================================================
-try:
-    EXA_KEY = st.secrets["EXA_KEY"]
-    PERPLEXITY_KEY = st.secrets["PERPLEXITY_KEY"]
-    LINKUP_KEY = st.secrets["LINKUP_KEY"]
-    GEMINI_KEY = st.secrets["GEMINI_KEY"]
-    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-except FileNotFoundError:
-    st.error("Secrets not found! Did you set up .streamlit/secrets.toml?")
-    st.stop()
+# 🛠️ KEYS (Loading from .env file)
+# ==============================================================================
+load_dotenv() # <--- This looks for the .env file automatically
 
+try:
+    EXA_KEY = os.getenv("EXA_KEY")
+    PERPLEXITY_KEY = os.getenv("PERPLEXITY_KEY")
+    LINKUP_KEY = os.getenv("LINKUP_KEY")
+    GEMINI_KEY = os.getenv("GEMINI_KEY")
+    SUPABASE_URL = os.getenv("SUPABASE_URL")
+    SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+    if not EXA_KEY:
+         raise ValueError("Keys are empty")
+
+except Exception as e:
+    st.error(f"Missing Keys: {e}")
+    st.stop()
 
 # ==============================================================================
 # ⚙️ SETUP
