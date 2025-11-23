@@ -1,0 +1,8 @@
+streamlit
+requests
+exa_py
+openai
+linkup-sdk
+google-generativeai
+python-dotenv
+pydantic
