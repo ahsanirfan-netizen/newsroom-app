@@ -7,14 +7,20 @@ from openai import OpenAI
 from linkup import LinkupClient
 
 # ==============================================================================
-# 🛠️ KEYS (For Vibe Coding, paste them here. We will secure them later)
 # ==============================================================================
-EXA_KEY = "your_exa_key".strip()
-PERPLEXITY_KEY = "your_perplexity_key".strip()
-LINKUP_KEY = "your_linkup_key".strip()
-GEMINI_KEY = "your_google_key".strip()
-SUPABASE_URL = "your_supabase_url".strip()
-SUPABASE_KEY = "your_supabase_anon_key".strip()
+# 🛠️ KEYS (Now loading securely from the Server)
+# ==============================================================================
+try:
+    EXA_KEY = st.secrets["EXA_KEY"]
+    PERPLEXITY_KEY = st.secrets["PERPLEXITY_KEY"]
+    LINKUP_KEY = st.secrets["LINKUP_KEY"]
+    GEMINI_KEY = st.secrets["GEMINI_KEY"]
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+except FileNotFoundError:
+    st.error("Secrets not found! Did you set up .streamlit/secrets.toml?")
+    st.stop()
+
 
 # ==============================================================================
 # ⚙️ SETUP
