@@ -46,7 +46,7 @@ except Exception as e:
 # ==============================================================================
 # 📱 THE UI
 # ==============================================================================
-st.title("📖 The Newsroom")
+st.title("📖 The Newsroom (AUTO-PILOT ACTIVE)")
 st.caption("Exa • Perplexity • Linkup • Gemini • Supabase")
 
 with st.sidebar:
