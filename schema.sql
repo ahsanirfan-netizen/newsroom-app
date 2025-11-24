@@ -26,3 +26,7 @@ CREATE TABLE IF NOT EXISTS characters (
 );
 -- Force add the column if it's missing
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS role TEXT;
+-- DATA PATCH: Move description to role for existing characters
+UPDATE characters 
+SET role = description 
+WHERE name = 'Napoleon' AND role IS NULL;

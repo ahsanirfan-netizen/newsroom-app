@@ -83,7 +83,10 @@ with st.sidebar:
             chars = response.json()
             if len(chars) > 0:
                 for c in chars:
-                    st.text(f"👤 {c['name']} ({c['role']})")
+                        # Use .get() to avoid crashing if 'role' is None
+                        role_display = c.get('role') or "Unknown Role"
+                        st.text(f"👤 {c['name']} ({role_display})")
+
             else:
                 st.info("Table found, but empty.")
         else:
