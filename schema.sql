@@ -24,3 +24,5 @@ CREATE TABLE IF NOT EXISTS characters (
     description TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+-- Force add the column if it's missing
+ALTER TABLE characters ADD COLUMN IF NOT EXISTS role TEXT;
