@@ -59,30 +59,48 @@ with st.sidebar:
 
     st.divider()
     
-    # --- NEW SECTION: CHARACTERS ---
+ # --- NEW SECTION: CHARACTERS ---
+    # ... (inside with st.sidebar) ...
+
+    st.divider()
     st.header("🎭 Dramatis Personae")
     
-    # 1. Fetch Characters
+    # 1. FETCH CHARACTERS (Debug Version)
+    st.caption("Debug: Fetching list...")
+    
     try:
-        chars = requests.get(
+        # We perform the GET request
+        response = requests.get(
             f"{SUPABASE_URL}/rest/v1/characters?select=name,role",
-            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-        ).json()
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}"
+            }
+        )
         
-        if len(chars) > 0:
-            for c in chars:
-                st.text(f"👤 {c['name']} ({c['role']})")
+        # Check if the request succeeded
+        if response.status_code == 200:
+            chars = response.json()
+            if len(chars) > 0:
+                for c in chars:
+                    st.text(f"👤 {c['name']} ({c['role']})")
+            else:
+                st.info("Table found, but empty.")
         else:
-            st.caption("No characters defined.")
-    except:
-        pass
+            # PRINT THE ERROR IF IT FAILS
+            st.error(f"Fetch Error {response.status_code}: {response.text}")
 
-    # 2. Add New Character
+    except Exception as e:
+        st.error(f"System Error: {e}")
+
+    # 2. ADD NEW CHARACTER (Debug Version)
     with st.expander("Add Character"):
         new_name = st.text_input("Name")
         new_role = st.text_input("Role (e.g. Emperor)")
+        
         if st.button("Save Char"):
-            requests.post(
+            # Check for duplicates before sending? No, let the DB handle it.
+            res = requests.post(
                 f"{SUPABASE_URL}/rest/v1/characters",
                 headers={
                     "apikey": SUPABASE_KEY,
@@ -92,16 +110,14 @@ with st.sidebar:
                 },
                 json={"name": new_name, "role": new_role}
             )
-            st.rerun()
             
-    st.divider()
-
-    st.header("Chapter Settings")
-    topic = st.text_input("Topic", "The Coronation of Napoleon")
-    character = st.text_input("Character", "Napoleon")
-    location = st.text_input("Location", "Paris")
-    start_date = st.date_input("Start Date")
-    end_date = st.date_input("End Date")
+            if res.status_code == 201:
+                st.success("Saved!")
+                st.rerun()
+            elif res.status_code == 409:
+                st.warning(f"'{new_name}' already exists!")
+            else:
+                st.error(f"Save Error {res.status_code}: {res.text}")
 
 # --- MAIN BUTTON ---
 if st.button("✍️ Write & Save Chapter", type="primary"):
