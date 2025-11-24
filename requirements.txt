@@ -6,3 +6,4 @@ linkup-sdk
 google-generativeai
 python-dotenv
 pydantic
+psycopg2-binary
