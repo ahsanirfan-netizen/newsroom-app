@@ -1,4 +1,23 @@
--- 1. The Bookshelf
+-- 1. THE LIBRARY (Books)
+CREATE TABLE IF NOT EXISTS books (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    user_prompt TEXT,
+    status TEXT DEFAULT 'planning',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 2. THE OUTLINE (Table of Contents)
+CREATE TABLE IF NOT EXISTS table_of_contents (
+    id SERIAL PRIMARY KEY,
+    book_id INT REFERENCES books(id),
+    chapter_number INT,
+    title TEXT,
+    summary_goal TEXT,
+    status TEXT DEFAULT 'pending'
+);
+
+-- 3. THE DRAFTS (Written Chapters)
 CREATE TABLE IF NOT EXISTS book_chapters (
     id SERIAL PRIMARY KEY,
     topic TEXT NOT NULL,
@@ -6,18 +25,7 @@ CREATE TABLE IF NOT EXISTS book_chapters (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 2. The Timeline
-CREATE TABLE IF NOT EXISTS timeline (
-    id SERIAL PRIMARY KEY,
-    character_name TEXT,
-    location TEXT NOT NULL,
-    start_date DATE NOT NULL,
-    end_date DATE NOT NULL,
-    chapter_id INT,
-    granularity TEXT DEFAULT 'day'
-);
-
--- 3. Dramatis Personae
+-- 4. THE CAST (Dramatis Personae)
 CREATE TABLE IF NOT EXISTS characters (
     id SERIAL PRIMARY KEY,
     name TEXT UNIQUE NOT NULL,
@@ -26,41 +34,12 @@ CREATE TABLE IF NOT EXISTS characters (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- ==================================================================
--- 🛠️ MIGRATION: PHYSICS ENGINE LOGIC (SMART OVERLAP)
--- ==================================================================
-
--- This function runs before every save. It checks for conflicts.
-CREATE OR REPLACE FUNCTION check_physics_violation()
-RETURNS TRIGGER AS $$
-BEGIN
-    -- PHYSICS RULE:
-    -- A conflict ONLY exists if:
-    -- 1. Same Character
-    -- 2. Different Location
-    -- 3. Dates Overlap
-    -- 4. AND BOTH entries are 'day' (Exact precision).
-    -- If one entry is 'year' (vague), we allow the overlap.
-
-    IF EXISTS (
-        SELECT 1 FROM timeline
-        WHERE character_name = NEW.character_name
-          AND location <> NEW.location
-          AND (start_date, end_date) OVERLAPS (NEW.start_date, NEW.end_date)
-          AND id <> NEW.id
-          AND granularity = 'day'      -- Existing entry must be strict
-          AND NEW.granularity = 'day'  -- New entry must be strict to cause conflict
-    ) THEN
-        RAISE EXCEPTION 'IMPOSSIBILITY ERROR: % cannot be in % and another location at the same time.', NEW.character_name, NEW.location USING ERRCODE = 'P0001';
-    END IF;
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Apply Trigger
-DROP TRIGGER IF EXISTS trigger_physics_check ON timeline;
-
-CREATE TRIGGER trigger_physics_check
-BEFORE INSERT OR UPDATE ON timeline
-FOR EACH ROW EXECUTE FUNCTION check_physics_violation();
+-- 5. THE PHYSICS ENGINE (Timeline)
+CREATE TABLE IF NOT EXISTS timeline (
+    id SERIAL PRIMARY KEY,
+    character_name TEXT,
+    location TEXT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    chapter_id INT
+);
