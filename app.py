@@ -37,13 +37,38 @@ except Exception as e:
     st.error(f"Setup Error: {e}")
 
 # ==============================================================================
+# 🧠 HELPER: EXTRACT SPECS FROM BRIEF
+# ==============================================================================
+def analyze_brief_for_specs(brief):
+    """
+    Uses Gemini to determine WHO, WHERE, and WHEN the user wants to write about
+    based on their natural language brief.
+    """
+    prompt = f"""
+    Analyze this writing prompt and extract the scene constraints.
+    
+    PROMPT: "{brief}"
+    
+    OUTPUT JSON ONLY:
+    {{
+        "character_name": "Name",
+        "location": "Location", 
+        "start_date": "YYYY-MM-DD" (or "YYYY-MM-DD BC"),
+        "end_date": "YYYY-MM-DD" (or "YYYY-MM-DD BC")
+    }}
+    If dates are not specified, estimate based on historical context or use today.
+    """
+    model = genai.GenerativeModel('gemini-2.5-pro')
+    response = model.generate_content(prompt)
+    try:
+        return json.loads(response.text.replace("```json", "").replace("```", "").strip())
+    except:
+        return None
+
+# ==============================================================================
 # 🧠 THE CARTOGRAPHER FUNCTION (GEMINI)
 # ==============================================================================
 def run_cartographer(source_text):
-    """
-    Uses Gemini to read text and extract Timeline Events into Supabase.
-    Returns: count (int), data (json), conflicts (summary list), logs (detailed strings)
-    """
     prompt = f"""
     You are a Data Engineer. Extract a structured timeline from this text.
     
@@ -61,12 +86,10 @@ def run_cartographer(source_text):
     
     model = genai.GenerativeModel('gemini-2.5-pro') 
     response = model.generate_content(prompt)
-    
     raw_json = response.text.replace("```json", "").replace("```", "").strip()
     
     try:
         data = json.loads(raw_json)
-        
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -81,25 +104,14 @@ def run_cartographer(source_text):
         for item in data:
             char_name = item['character_name']
             
-            # ---------------------------------------------------------
-            # STEP 1: UPSERT CHARACTER (Fixes Foreign Key Error)
-            # ---------------------------------------------------------
-            # We try to insert the character first. If they exist, we ignore the error.
-            char_payload = {
-                "name": char_name, 
-                "role": "Auto-Imported" 
-            }
-            # 'resolution=ignore-duplicates' prevents 409 errors if they already exist
+            # STEP 1: UPSERT CHARACTER
+            char_payload = {"name": char_name, "role": "Auto-Imported"}
             char_headers = headers.copy()
             char_headers["Prefer"] = "resolution=ignore-duplicates"
-            
             requests.post(f"{SUPABASE_URL}/rest/v1/characters", headers=char_headers, json=char_payload)
             
-            # ---------------------------------------------------------
             # STEP 2: INSERT TIMELINE EVENT
-            # ---------------------------------------------------------
             safe_loc = item.get('location') or "Unknown Location"
-            
             payload = {
                 "character_name": char_name,
                 "location": safe_loc,
@@ -143,7 +155,7 @@ with st.sidebar:
     )
     
     st.divider()
-    st.caption("Manual Overrides (Optional)")
+    st.caption("Manual Overrides (Ignored if Auto-Detect works)")
     character = st.text_input("Character", "Napoleon")
     location = st.text_input("Location", "Paris")
     start_date = st.date_input("Start Date")
@@ -216,6 +228,26 @@ if st.button("🗺️ 1. Research & Map Territory"):
 if st.button("✍️ 2. Write Chapter (With Physics Check)"):
     status = st.empty()
     try:
+        # 1. AUTO-DETECT SPECS
+        status.info("🕵️ Analyzing Brief for Constraints...")
+        specs = analyze_brief_for_specs(mission_brief)
+        
+        if specs:
+            # Use Auto-Detected Specs
+            check_char = specs.get("character_name", character)
+            check_loc = specs.get("location", location)
+            check_start = specs.get("start_date", str(start_date))
+            check_end = specs.get("end_date", str(end_date))
+            st.caption(f"Checking Constraints: {check_char} in {check_loc} ({check_start})")
+        else:
+            # Fallback to Sidebar
+            check_char = character
+            check_loc = location
+            check_start = str(start_date)
+            check_end = str(end_date)
+            st.warning("Could not auto-detect specs. Using Sidebar defaults.")
+
+        # 2. PHYSICS CHECK
         status.info("🛡️ Checking Physics...")
         
         supa_headers = {
@@ -226,12 +258,19 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
         }
         
         payload_check = {
-            "character_name": character,
-            "location": location,
-            "start_date": str(start_date),
-            "end_date": str(end_date)
+            "character_name": check_char,
+            "location": check_loc,
+            "start_date": check_start,
+            "end_date": check_end
         }
         
+        # Check Character Registration first (to avoid FK error)
+        char_reg = {"name": check_char, "role": "Protagonist"}
+        reg_headers = supa_headers.copy()
+        reg_headers["Prefer"] = "resolution=ignore-duplicates"
+        requests.post(f"{SUPABASE_URL}/rest/v1/characters", headers=reg_headers, json=char_reg)
+        
+        # Check Timeline
         check = requests.post(f"{SUPABASE_URL}/rest/v1/timeline", headers=supa_headers, json=payload_check)
         
         if check.status_code >= 400:
@@ -249,6 +288,7 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
             
         status.success("✅ Physics Check Passed")
         
+        # 3. RESEARCH
         status.info("📚 Researching...")
         search = exa.search_and_contents(
             mission_brief, 
@@ -258,6 +298,7 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
         )
         source = search.results[0].text[:2000]
         
+        # 4. WRITE
         status.info("✍️ Perplexity is writing...")
         draft_resp = perplexity.chat.completions.create(
             model="sonar-pro",
@@ -265,6 +306,7 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
         )
         draft = draft_resp.choices[0].message.content
         
+        # 5. SAVE
         status.info("💾 Saving to Bookshelf...")
         save_payload = {"topic": chapter_title, "content": draft}
         requests.post(f"{SUPABASE_URL}/rest/v1/book_chapters", headers=supa_headers, json=save_payload)
