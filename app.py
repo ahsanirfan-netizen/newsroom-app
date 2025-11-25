@@ -225,4 +225,21 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
         
         draft_resp = perplexity.chat.completions.create(
             model="sonar-pro",
-            messages
+            messages=[{"role": "user", "content": f"Write a scene based on this brief: {mission_brief}. Source Material: {source}"}]
+        )
+        draft = draft_resp.choices[0].message.content
+        
+        # 4. Save
+        status.info("💾 Saving to Bookshelf...")
+        save_payload = {"topic": chapter_title, "content": draft}
+        requests.post(f"{SUPABASE_URL}/rest/v1/book_chapters", headers=supa_headers, json=save_payload)
+        
+        status.empty()
+        st.balloons()
+        st.subheader(f"Chapter: {chapter_title}")
+        st.write(draft)
+        
+    except Exception as e:
+        st.error("Writer Failed")
+        with st.expander("Technical Logs"):
+            st.code(traceback.format_exc())
