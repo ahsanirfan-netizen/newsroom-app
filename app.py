@@ -53,8 +53,7 @@ def analyze_brief_for_specs(brief):
         "character_name": "Name",
         "location": "Location", 
         "start_date": "YYYY-MM-DD" (or "YYYY-MM-DD BC"),
-        "end_date": "YYYY-MM-DD" (or "YYYY-MM-DD BC"),
-        "granularity": "day" or "year" (Use "year" if the user was vague, "day" if specific)
+        "end_date": "YYYY-MM-DD" (or "YYYY-MM-DD BC")
     }}
     """
     model = genai.GenerativeModel('gemini-2.5-pro')
@@ -78,13 +77,12 @@ def run_cartographer(source_text):
     1. Identify every MAJOR figure/entity and their location/date.
     2. Output a JSON list.
     3. Keys: 
-       - "character_name" (String only, do not group characters)
+       - "character_name" (String only)
        - "location"
        - "start_date" (Format: "YYYY-MM-DD" or "YYYY-MM-DD BC")
        - "end_date"
-       - "granularity": "day" (if exact date known) OR "year" (if only year known)
     4. CRITICAL: For BC dates, use "YYYY-MM-DD BC".
-    5. If only year is known: Set dates to Jan 1st - Dec 31st, but set "granularity": "year".
+    5. If only year is known: Set dates to Jan 1st - Dec 31st.
     6. JSON OUTPUT ONLY. No markdown.
     """
     
@@ -107,12 +105,10 @@ def run_cartographer(source_text):
         
         for item in data:
             # ------------------------------------------------------------------
-            # FIX: Handle Lists (Flatten Grouped Characters)
+            # FIX 1: FLATTEN LISTS (Handles ["Caesar", "Pirates"] grouping error)
             # ------------------------------------------------------------------
             raw_names = item['character_name']
             
-            # If Gemini gave a list ["Caesar", "Pirates"], split into list. 
-            # If string "Caesar", wrap in list ["Caesar"] for uniform looping.
             if isinstance(raw_names, str):
                 names_to_process = [raw_names]
             elif isinstance(raw_names, list):
@@ -127,14 +123,27 @@ def run_cartographer(source_text):
                 char_headers["Prefer"] = "resolution=ignore-duplicates"
                 requests.post(f"{SUPABASE_URL}/rest/v1/characters", headers=char_headers, json=char_payload)
                 
-                # STEP 2: INSERT TIMELINE EVENT
+                # --------------------------------------------------------------
+                # FIX 2: AUTO-CALCULATE GRANULARITY (Solves Overlap Errors)
+                # --------------------------------------------------------------
+                s_date = item['start_date']
+                e_date = item['end_date']
+                
+                # Logic: If Start != End, it's a Range/Period. Treat as vague ('year').
+                # If Start == End, it's a specific Event. Treat as strict ('day').
+                if s_date != e_date:
+                    computed_granularity = "year"
+                else:
+                    computed_granularity = "day"
+
                 safe_loc = item.get('location') or "Unknown Location"
+                
                 payload = {
                     "character_name": char_name,
                     "location": safe_loc,
-                    "start_date": item['start_date'],
-                    "end_date": item['end_date'],
-                    "granularity": item.get('granularity', 'day')
+                    "start_date": s_date,
+                    "end_date": e_date,
+                    "granularity": computed_granularity # Calculated strictly by Python
                 }
                 
                 res = requests.post(f"{SUPABASE_URL}/rest/v1/timeline", headers=headers, json=payload)
@@ -254,15 +263,19 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
             check_loc = specs.get("location", location)
             check_start = specs.get("start_date", str(start_date))
             check_end = specs.get("end_date", str(end_date))
-            check_granularity = specs.get("granularity", "day")
-            st.caption(f"Checking: {check_char} in {check_loc} ({check_granularity})")
         else:
             check_char = character
             check_loc = location
             check_start = str(start_date)
             check_end = str(end_date)
+
+        # Auto-Calculate Granularity for Check
+        if check_start != check_end:
+            check_granularity = "year"
+        else:
             check_granularity = "day"
-            st.warning("Using Sidebar defaults.")
+
+        st.caption(f"Checking: {check_char} in {check_loc} ({check_granularity})")
 
         # 2. PHYSICS CHECK
         status.info("🛡️ Checking Physics...")
