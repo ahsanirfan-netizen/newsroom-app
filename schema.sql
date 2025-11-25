@@ -43,3 +43,5 @@ CREATE TABLE IF NOT EXISTS timeline (
     end_date DATE NOT NULL,
     chapter_id INT
 );
+-- 6. UPGRADE: Add content column to the outline so we can link chapters
+ALTER TABLE table_of_contents ADD COLUMN IF NOT EXISTS content TEXT;
