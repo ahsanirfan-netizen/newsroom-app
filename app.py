@@ -3,6 +3,7 @@ import requests
 import traceback
 import os
 import json
+import psycopg2
 import google.generativeai as genai
 from exa_py import Exa
 from openai import OpenAI
@@ -21,6 +22,8 @@ try:
     GEMINI_KEY = os.getenv("GEMINI_KEY")
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+    # DATABASE_URL is required for the "Repair" button to work
+    DATABASE_URL = os.getenv("DATABASE_URL") 
 except Exception:
     st.error("Missing Keys! Check your .env file.")
     st.stop()
@@ -50,7 +53,7 @@ def analyze_brief_for_specs(brief):
     
     OUTPUT JSON ONLY:
     {{
-        "character_name": "Name",
+        "character_name": "Name" (Return a SINGLE string, e.g. "Julius Caesar"),
         "location": "Location", 
         "start_date": "YYYY-MM-DD" (or "YYYY-MM-DD BC"),
         "end_date": "YYYY-MM-DD" (or "YYYY-MM-DD BC")
@@ -104,9 +107,7 @@ def run_cartographer(source_text):
         error_logs = [] 
         
         for item in data:
-            # ------------------------------------------------------------------
-            # FIX 1: FLATTEN LISTS (Handles ["Caesar", "Pirates"] grouping error)
-            # ------------------------------------------------------------------
+            # FIX 1: FLATTEN LISTS (Handles ["Caesar", "Pirates"])
             raw_names = item['character_name']
             
             if isinstance(raw_names, str):
@@ -123,14 +124,10 @@ def run_cartographer(source_text):
                 char_headers["Prefer"] = "resolution=ignore-duplicates"
                 requests.post(f"{SUPABASE_URL}/rest/v1/characters", headers=char_headers, json=char_payload)
                 
-                # --------------------------------------------------------------
-                # FIX 2: AUTO-CALCULATE GRANULARITY (Solves Overlap Errors)
-                # --------------------------------------------------------------
+                # FIX 2: AUTO-CALCULATE GRANULARITY
                 s_date = item['start_date']
                 e_date = item['end_date']
                 
-                # Logic: If Start != End, it's a Range/Period. Treat as vague ('year').
-                # If Start == End, it's a specific Event. Treat as strict ('day').
                 if s_date != e_date:
                     computed_granularity = "year"
                 else:
@@ -143,7 +140,7 @@ def run_cartographer(source_text):
                     "location": safe_loc,
                     "start_date": s_date,
                     "end_date": e_date,
-                    "granularity": computed_granularity # Calculated strictly by Python
+                    "granularity": computed_granularity
                 }
                 
                 res = requests.post(f"{SUPABASE_URL}/rest/v1/timeline", headers=headers, json=payload)
@@ -188,20 +185,58 @@ with st.sidebar:
     start_date = st.date_input("Start Date")
     end_date = st.date_input("End Date")
     
+    # --- NEW: DATABASE REPAIR TOOL ---
     st.divider()
-    st.header("📚 Your Book")
-    try:
-        rows = requests.get(
-            f"{SUPABASE_URL}/rest/v1/book_chapters?select=topic,created_at&order=created_at.desc",
-            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-        ).json()
-        if len(rows) > 0:
-            for row in rows:
-                st.text(f"📄 {row['topic']}")
+    st.header("🛠️ Admin Tools")
+    if st.button("🛠️ Repair Database Schema"):
+        if not DATABASE_URL:
+            st.error("DATABASE_URL not found in env vars.")
         else:
-            st.caption("No chapters yet.")
-    except:
-        pass
+            try:
+                with st.spinner("Updating Physics Engine Logic..."):
+                    conn = psycopg2.connect(DATABASE_URL)
+                    cur = conn.cursor()
+                    
+                    # 1. Add Granularity Column
+                    cur.execute("ALTER TABLE timeline ADD COLUMN IF NOT EXISTS granularity TEXT DEFAULT 'day';")
+                    
+                    # 2. Update the Trigger Function (The Fix for 'Year' overlaps)
+                    sql_func = """
+                    CREATE OR REPLACE FUNCTION check_physics_violation()
+                    RETURNS TRIGGER AS $$
+                    BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM timeline
+                            WHERE character_name = NEW.character_name
+                              AND location <> NEW.location
+                              AND (start_date, end_date) OVERLAPS (NEW.start_date, NEW.end_date)
+                              AND id <> NEW.id
+                              AND granularity = 'day'
+                              AND NEW.granularity = 'day'
+                        ) THEN
+                            RAISE EXCEPTION 'IMPOSSIBILITY ERROR: % cannot be in % and another location at the same time.', NEW.character_name, NEW.location USING ERRCODE = 'P0001';
+                        END IF;
+                        RETURN NEW;
+                    END;
+                    $$ LANGUAGE plpgsql;
+                    """
+                    cur.execute(sql_func)
+                    
+                    # 3. Re-apply Trigger
+                    cur.execute("DROP TRIGGER IF EXISTS trigger_physics_check ON timeline;")
+                    cur.execute("""
+                        CREATE TRIGGER trigger_physics_check
+                        BEFORE INSERT OR UPDATE ON timeline
+                        FOR EACH ROW EXECUTE FUNCTION check_physics_violation();
+                    """)
+                    
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    st.success("✅ Database Logic Updated! Granularity check is now active.")
+            except Exception as e:
+                st.error(f"Repair Failed: {e}")
+
 
 # ==============================================================================
 # 🚀 MAIN LOGIC
@@ -260,6 +295,11 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
         
         if specs:
             check_char = specs.get("character_name", character)
+            
+            # FIX: HANDLE LISTS IN WRITER (e.g. ["Caesar", "Pirates"])
+            if isinstance(check_char, list):
+                check_char = check_char[0]
+                
             check_loc = specs.get("location", location)
             check_start = specs.get("start_date", str(start_date))
             check_end = specs.get("end_date", str(end_date))
@@ -269,7 +309,7 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
             check_start = str(start_date)
             check_end = str(end_date)
 
-        # Auto-Calculate Granularity for Check
+        # Auto-Calculate Granularity
         if check_start != check_end:
             check_granularity = "year"
         else:
