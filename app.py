@@ -50,24 +50,21 @@ def run_cartographer(source_text):
     {source_text[:5000]}
     
     INSTRUCTIONS:
-    1. Identify every MAJOR historical figure and their location/date.
+    1. Identify every MAJOR figure/entity and their location/date.
     2. Output a JSON list.
     3. Keys: "character_name", "location", "start_date" (YYYY-MM-DD), "end_date" (YYYY-MM-DD).
     4. If exact date is unknown, estimate the first of the month.
     5. JSON OUTPUT ONLY. No markdown.
     """
     
-    # --- THE FIX: UPDATED MODEL NAME ---
     model = genai.GenerativeModel('gemini-2.5-pro') 
     response = model.generate_content(prompt)
     
-    # Clean the response (Gemini sometimes adds ```json blocks)
     raw_json = response.text.replace("```json", "").replace("```", "").strip()
     
     try:
         data = json.loads(raw_json)
         
-        # Insert into Supabase
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -79,24 +76,27 @@ def run_cartographer(source_text):
         conflicts = []
         
         for item in data:
+            # SAFETY CHECK: Handle NULL locations
+            safe_loc = item.get('location')
+            if not safe_loc:
+                safe_loc = "Unknown Location"
+
             payload = {
                 "character_name": item['character_name'],
-                "location": item['location'],
+                "location": safe_loc,
                 "start_date": item['start_date'],
                 "end_date": item['end_date']
             }
-            # We ignore errors (e.g. conflicts) for now to keep it moving
+            
             res = requests.post(f"{SUPABASE_URL}/rest/v1/timeline", headers=headers, json=payload)
             if res.status_code == 201:
                 count += 1
             elif res.status_code >= 400:
-                # Optional: Track conflicts to show user
                 conflicts.append(f"{item['character_name']} @ {item['location']}")
                 
         return count, data, conflicts
         
     except Exception as e:
-        # Pass the error up so we can see it in the UI
         raise e
 
 # ==============================================================================
@@ -104,7 +104,11 @@ def run_cartographer(source_text):
 # ==============================================================================
 with st.sidebar:
     st.header("Chapter Settings")
-    topic = st.text_input("Topic", "The Coronation of Napoleon")
+    
+    # --- NEW FIELD: CONTEXT ---
+    # This guides the AI so it knows "History" vs "Fiction" vs "Physics"
+    search_context = st.text_input("Context / Domain", "Political History of")
+    topic = st.text_input("Topic", "The Assassination of Julius Caesar")
     
     st.divider()
     st.caption("Manual Overrides (Optional)")
@@ -137,9 +141,13 @@ with st.sidebar:
 if st.button("🗺️ 1. Research & Map Territory"):
     status = st.empty()
     try:
-        # A. Research
-        status.info("📚 Exa is finding source documents...")
-        search = exa.search_and_contents(topic, type="neural", num_results=1, text=True)
+        # A. Research (Using the Context Field)
+        status.info(f"📚 Exa is searching for: '{search_context} {topic}'...")
+        
+        # We combine Context + Topic for the search query
+        search_query = f"{search_context} {topic}"
+        
+        search = exa.search_and_contents(search_query, type="neural", num_results=1, text=True)
         if not search.results:
             st.error("Exa found no results.")
             st.stop()
@@ -171,8 +179,7 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
     try:
         status.info("🛡️ Checking Physics...")
         
-        # 1. Physics Check (Manual Override Check)
-        # Even if Cartographer filled the DB, we check the manual override if provided
+        # 1. Physics Check
         supa_headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -194,16 +201,17 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
             
         status.success("✅ Physics Check Passed")
         
-        # 2. Research (Again, for the writer context)
+        # 2. Research
         status.info("📚 Researching...")
-        search = exa.search_and_contents(topic, type="neural", num_results=1, text=True)
+        search_query = f"{search_context} {topic}" # Use Context here too
+        search = exa.search_and_contents(search_query, type="neural", num_results=1, text=True)
         source = search.results[0].text[:1500]
         
         # 3. Draft
         status.info("✍️ Perplexity is writing...")
         draft_resp = perplexity.chat.completions.create(
             model="sonar-pro",
-            messages=[{"role": "user", "content": f"Write a scene about {topic}. Source: {source}"}]
+            messages=[{"role": "user", "content": f"Write a scene about {topic}. Context: {search_context}. Source: {source}"}]
         )
         draft = draft_resp.choices[0].message.content
         
