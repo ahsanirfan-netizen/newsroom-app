@@ -105,11 +105,10 @@ def run_cartographer(source_text):
 with st.sidebar:
     st.header("Chapter Settings")
     
-    # --- UPDATED INPUTS ---
-    # 1. [span_0](start_span)A clean title for the Database (Schema requires a 'topic' column)[span_0](end_span)
+    # 1. Database Label
     chapter_title = st.text_input("Chapter Title (DB Label)", "The Assassination of Julius Caesar")
     
-    # 2. The Mission Brief: A verbose description for Exa/AI to understand intent
+    # 2. The Mission Brief
     mission_brief = st.text_area(
         "Mission Brief", 
         "Find primary source descriptions of the assassination of Julius Caesar, specifically focusing on the weapons used and the exact location in the Senate.",
@@ -123,7 +122,7 @@ with st.sidebar:
     start_date = st.date_input("Start Date")
     end_date = st.date_input("End Date")
     
-    # History Section
+    # Bookshelf
     st.divider()
     st.header("📚 Your Book")
     try:
@@ -147,15 +146,12 @@ with st.sidebar:
 if st.button("🗺️ 1. Research & Map Territory"):
     status = st.empty()
     try:
-        # A. Research (Using Mission Brief)
+        # A. Research (FIXED: Removed use_autoprompt)
         status.info(f"📚 Exa is processing brief...")
         
-        # UPDATED: Use mission_brief + use_autoprompt=True
-        # This optimizes the verbose user input into a perfect query
         search = exa.search_and_contents(
             mission_brief, 
             type="neural", 
-            use_autoprompt=True, 
             num_results=1, 
             text=True
         )
@@ -213,14 +209,12 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
             
         status.success("✅ Physics Check Passed")
         
-        # 2. Research (Using Mission Brief)
+        # 2. Research (FIXED: Removed use_autoprompt)
         status.info("📚 Researching...")
         
-        # UPDATED: Use mission_brief for research context
         search = exa.search_and_contents(
             mission_brief, 
             type="neural", 
-            use_autoprompt=True, 
             num_results=1, 
             text=True
         )
@@ -229,25 +223,6 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
         # 3. Draft
         status.info("✍️ Perplexity is writing...")
         
-        # UPDATED: Prompt now uses the Mission Brief directly
         draft_resp = perplexity.chat.completions.create(
             model="sonar-pro",
-            messages=[{"role": "user", "content": f"Write a scene based on this brief: {mission_brief}. Source Material: {source}"}]
-        )
-        draft = draft_resp.choices[0].message.content
-        
-        # 4. Save
-        status.info("💾 Saving to Bookshelf...")
-        # Uses 'chapter_title' for the DB topic column, but content is derived from 'mission_brief'
-        save_payload = {"topic": chapter_title, "content": draft}
-        requests.post(f"{SUPABASE_URL}/rest/v1/book_chapters", headers=supa_headers, json=save_payload)
-        
-        status.empty()
-        st.balloons()
-        st.subheader(f"Chapter: {chapter_title}")
-        st.write(draft)
-        
-    except Exception as e:
-        st.error("Writer Failed")
-        with st.expander("Technical Logs"):
-            st.code(traceback.format_exc())
+            messages
