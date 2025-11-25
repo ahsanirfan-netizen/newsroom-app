@@ -3,7 +3,7 @@ requests
 exa_py
 openai
 linkup-sdk
-google-generativeai
+google-generativeai>=0.8.0
 python-dotenv
 pydantic
 psycopg2-binary
