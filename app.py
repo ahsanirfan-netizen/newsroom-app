@@ -122,6 +122,19 @@ with st.sidebar:
             else:
                 st.error(f"Save Error {res.status_code}: {res.text}")
 
+        # ---------------------------------------------------------
+    # RESTORED SECTION: THE INPUTS
+    # ---------------------------------------------------------
+    st.divider()
+    st.header("Chapter Settings")
+    
+    # These variables need to be global so the main button can see them
+    topic = st.text_input("Topic", "The Coronation of Napoleon")
+    character = st.text_input("Character", "Napoleon")
+    location = st.text_input("Location", "Paris")
+    start_date = st.date_input("Start Date")
+    end_date = st.date_input("End Date")
+
 # --- MAIN BUTTON ---
 if st.button("✍️ Write & Save Chapter", type="primary"):
     # (Keep your existing logic here, I won't repeat it to save space)
