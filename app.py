@@ -68,7 +68,6 @@ def analyze_brief_for_specs(brief):
 # 🧠 THE CARTOGRAPHER FUNCTION (GEMINI)
 # ==============================================================================
 def run_cartographer(source_text):
-    # UPDATED PROMPT: Extract Granularity (Precision)
     prompt = f"""
     You are a Data Engineer. Extract a structured timeline from this text.
     
@@ -79,7 +78,7 @@ def run_cartographer(source_text):
     1. Identify every MAJOR figure/entity and their location/date.
     2. Output a JSON list.
     3. Keys: 
-       - "character_name"
+       - "character_name" (String only, do not group characters)
        - "location"
        - "start_date" (Format: "YYYY-MM-DD" or "YYYY-MM-DD BC")
        - "end_date"
@@ -107,37 +106,50 @@ def run_cartographer(source_text):
         error_logs = [] 
         
         for item in data:
-            char_name = item['character_name']
+            # ------------------------------------------------------------------
+            # FIX: Handle Lists (Flatten Grouped Characters)
+            # ------------------------------------------------------------------
+            raw_names = item['character_name']
             
-            # STEP 1: UPSERT CHARACTER
-            char_payload = {"name": char_name, "role": "Auto-Imported"}
-            char_headers = headers.copy()
-            char_headers["Prefer"] = "resolution=ignore-duplicates"
-            requests.post(f"{SUPABASE_URL}/rest/v1/characters", headers=char_headers, json=char_payload)
-            
-            # STEP 2: INSERT TIMELINE EVENT (With Granularity)
-            safe_loc = item.get('location') or "Unknown Location"
-            payload = {
-                "character_name": char_name,
-                "location": safe_loc,
-                "start_date": item['start_date'],
-                "end_date": item['end_date'],
-                "granularity": item.get('granularity', 'day') # NEW FIELD
-            }
-            
-            res = requests.post(f"{SUPABASE_URL}/rest/v1/timeline", headers=headers, json=payload)
-            
-            if res.status_code == 201:
-                count += 1
-            elif res.status_code >= 400:
-                log_entry = (
-                    f"❌ FAILED: {char_name} @ {safe_loc}\n"
-                    f"   Status: {res.status_code}\n"
-                    f"   Response: {res.text}\n"
-                    f"   Payload: {json.dumps(payload)}"
-                )
-                error_logs.append(log_entry)
-                conflicts.append(f"{char_name} ({res.status_code})")
+            # If Gemini gave a list ["Caesar", "Pirates"], split into list. 
+            # If string "Caesar", wrap in list ["Caesar"] for uniform looping.
+            if isinstance(raw_names, str):
+                names_to_process = [raw_names]
+            elif isinstance(raw_names, list):
+                names_to_process = raw_names
+            else:
+                names_to_process = [str(raw_names)]
+
+            for char_name in names_to_process:
+                # STEP 1: UPSERT CHARACTER
+                char_payload = {"name": char_name, "role": "Auto-Imported"}
+                char_headers = headers.copy()
+                char_headers["Prefer"] = "resolution=ignore-duplicates"
+                requests.post(f"{SUPABASE_URL}/rest/v1/characters", headers=char_headers, json=char_payload)
+                
+                # STEP 2: INSERT TIMELINE EVENT
+                safe_loc = item.get('location') or "Unknown Location"
+                payload = {
+                    "character_name": char_name,
+                    "location": safe_loc,
+                    "start_date": item['start_date'],
+                    "end_date": item['end_date'],
+                    "granularity": item.get('granularity', 'day')
+                }
+                
+                res = requests.post(f"{SUPABASE_URL}/rest/v1/timeline", headers=headers, json=payload)
+                
+                if res.status_code == 201:
+                    count += 1
+                elif res.status_code >= 400:
+                    log_entry = (
+                        f"❌ FAILED: {char_name} @ {safe_loc}\n"
+                        f"   Status: {res.status_code}\n"
+                        f"   Response: {res.text}\n"
+                        f"   Payload: {json.dumps(payload)}"
+                    )
+                    error_logs.append(log_entry)
+                    conflicts.append(f"{char_name} ({res.status_code})")
                 
         return count, data, conflicts, error_logs
         
@@ -242,7 +254,6 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
             check_loc = specs.get("location", location)
             check_start = specs.get("start_date", str(start_date))
             check_end = specs.get("end_date", str(end_date))
-            # Default to exact 'day' unless Gemini flagged it as vague
             check_granularity = specs.get("granularity", "day")
             st.caption(f"Checking: {check_char} in {check_loc} ({check_granularity})")
         else:
@@ -268,7 +279,7 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
             "location": check_loc,
             "start_date": check_start,
             "end_date": check_end,
-            "granularity": check_granularity # Sent to DB to trigger fuzzy logic
+            "granularity": check_granularity
         }
         
         # Register Character
