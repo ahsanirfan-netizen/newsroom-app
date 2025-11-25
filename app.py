@@ -105,10 +105,16 @@ def run_cartographer(source_text):
 with st.sidebar:
     st.header("Chapter Settings")
     
-    # --- NEW FIELD: CONTEXT ---
-    # This guides the AI so it knows "History" vs "Fiction" vs "Physics"
-    search_context = st.text_input("Context / Domain", "Political History of")
-    topic = st.text_input("Topic", "The Assassination of Julius Caesar")
+    # --- UPDATED INPUTS ---
+    # 1. [span_0](start_span)A clean title for the Database (Schema requires a 'topic' column)[span_0](end_span)
+    chapter_title = st.text_input("Chapter Title (DB Label)", "The Assassination of Julius Caesar")
+    
+    # 2. The Mission Brief: A verbose description for Exa/AI to understand intent
+    mission_brief = st.text_area(
+        "Mission Brief", 
+        "Find primary source descriptions of the assassination of Julius Caesar, specifically focusing on the weapons used and the exact location in the Senate.",
+        height=150
+    )
     
     st.divider()
     st.caption("Manual Overrides (Optional)")
@@ -141,13 +147,19 @@ with st.sidebar:
 if st.button("🗺️ 1. Research & Map Territory"):
     status = st.empty()
     try:
-        # A. Research (Using the Context Field)
-        status.info(f"📚 Exa is searching for: '{search_context} {topic}'...")
+        # A. Research (Using Mission Brief)
+        status.info(f"📚 Exa is processing brief...")
         
-        # We combine Context + Topic for the search query
-        search_query = f"{search_context} {topic}"
+        # UPDATED: Use mission_brief + use_autoprompt=True
+        # This optimizes the verbose user input into a perfect query
+        search = exa.search_and_contents(
+            mission_brief, 
+            type="neural", 
+            use_autoprompt=True, 
+            num_results=1, 
+            text=True
+        )
         
-        search = exa.search_and_contents(search_query, type="neural", num_results=1, text=True)
         if not search.results:
             st.error("Exa found no results.")
             st.stop()
@@ -201,28 +213,38 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
             
         status.success("✅ Physics Check Passed")
         
-        # 2. Research
+        # 2. Research (Using Mission Brief)
         status.info("📚 Researching...")
-        search_query = f"{search_context} {topic}" # Use Context here too
-        search = exa.search_and_contents(search_query, type="neural", num_results=1, text=True)
-        source = search.results[0].text[:1500]
+        
+        # UPDATED: Use mission_brief for research context
+        search = exa.search_and_contents(
+            mission_brief, 
+            type="neural", 
+            use_autoprompt=True, 
+            num_results=1, 
+            text=True
+        )
+        source = search.results[0].text[:2000]
         
         # 3. Draft
         status.info("✍️ Perplexity is writing...")
+        
+        # UPDATED: Prompt now uses the Mission Brief directly
         draft_resp = perplexity.chat.completions.create(
             model="sonar-pro",
-            messages=[{"role": "user", "content": f"Write a scene about {topic}. Context: {search_context}. Source: {source}"}]
+            messages=[{"role": "user", "content": f"Write a scene based on this brief: {mission_brief}. Source Material: {source}"}]
         )
         draft = draft_resp.choices[0].message.content
         
         # 4. Save
         status.info("💾 Saving to Bookshelf...")
-        save_payload = {"topic": topic, "content": draft}
+        # Uses 'chapter_title' for the DB topic column, but content is derived from 'mission_brief'
+        save_payload = {"topic": chapter_title, "content": draft}
         requests.post(f"{SUPABASE_URL}/rest/v1/book_chapters", headers=supa_headers, json=save_payload)
         
         status.empty()
         st.balloons()
-        st.subheader(f"Chapter: {topic}")
+        st.subheader(f"Chapter: {chapter_title}")
         st.write(draft)
         
     except Exception as e:
