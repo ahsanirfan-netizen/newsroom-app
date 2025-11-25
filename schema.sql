@@ -1,4 +1,4 @@
--- 1. The Bookshelf (Where we save chapters)
+-- 1. The Bookshelf (No changes, but kept for context)
 CREATE TABLE IF NOT EXISTS book_chapters (
     id SERIAL PRIMARY KEY,
     topic TEXT NOT NULL,
@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS book_chapters (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 2. The Timeline (The Physics Engine)
+-- 2. The Timeline
 CREATE TABLE IF NOT EXISTS timeline (
     id SERIAL PRIMARY KEY,
     character_name TEXT,
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS timeline (
     chapter_id INT
 );
 
--- 3. NEW TABLE: Dramatis Personae (Character Bios)
+-- 3. Dramatis Personae
 CREATE TABLE IF NOT EXISTS characters (
     id SERIAL PRIMARY KEY,
     name TEXT UNIQUE NOT NULL,
@@ -24,9 +24,46 @@ CREATE TABLE IF NOT EXISTS characters (
     description TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
--- Force add the column if it's missing
-ALTER TABLE characters ADD COLUMN IF NOT EXISTS role TEXT;
--- DATA PATCH: Move description to role for existing characters
-UPDATE characters 
-SET role = description 
-WHERE name = 'Napoleon' AND role IS NULL;
+
+-- ==================================================================
+-- 🛠️ MIGRATION: ADD GRANULARITY & PHYSICS ENGINE LOGIC
+-- ==================================================================
+
+-- A. Add the 'granularity' column to store if a date is 'day' (exact) or 'year' (vague)
+ALTER TABLE timeline ADD COLUMN IF NOT EXISTS granularity TEXT DEFAULT 'day';
+
+-- B. The Physics Logic Function
+-- This function runs before every save. It checks for conflicts.
+CREATE OR REPLACE FUNCTION check_physics_violation()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- PHYSICS RULE:
+    -- A conflict ONLY exists if:
+    -- 1. Same Character
+    -- 2. Different Location
+    -- 3. Dates Overlap
+    -- 4. AND BOTH entries are 'day' (Exact precision).
+    -- If one entry is 'year' (vague), we allow the overlap (assuming the specific event happened during that year).
+
+    IF EXISTS (
+        SELECT 1 FROM timeline
+        WHERE character_name = NEW.character_name
+          AND location <> NEW.location
+          AND (start_date, end_date) OVERLAPS (NEW.start_date, NEW.end_date)
+          AND id <> NEW.id -- Don't block itself
+          AND granularity = 'day'      -- Existing entry is strict
+          AND NEW.granularity = 'day'  -- New entry is strict
+    ) THEN
+        RAISE EXCEPTION 'IMPOSSIBILITY ERROR: % cannot be in % and another location at the same time (Exact Date Conflict).', NEW.character_name, NEW.location USING ERRCODE = 'P0001';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- C. Apply the Trigger
+DROP TRIGGER IF EXISTS trigger_physics_check ON timeline;
+
+CREATE TRIGGER trigger_physics_check
+BEFORE INSERT OR UPDATE ON timeline
+FOR EACH ROW EXECUTE FUNCTION check_physics_violation();

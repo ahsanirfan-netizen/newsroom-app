@@ -41,8 +41,7 @@ except Exception as e:
 # ==============================================================================
 def analyze_brief_for_specs(brief):
     """
-    Uses Gemini to determine WHO, WHERE, and WHEN the user wants to write about
-    based on their natural language brief.
+    Uses Gemini to determine WHO, WHERE, and WHEN the user wants to write about.
     """
     prompt = f"""
     Analyze this writing prompt and extract the scene constraints.
@@ -54,9 +53,9 @@ def analyze_brief_for_specs(brief):
         "character_name": "Name",
         "location": "Location", 
         "start_date": "YYYY-MM-DD" (or "YYYY-MM-DD BC"),
-        "end_date": "YYYY-MM-DD" (or "YYYY-MM-DD BC")
+        "end_date": "YYYY-MM-DD" (or "YYYY-MM-DD BC"),
+        "granularity": "day" or "year" (Use "year" if the user was vague, "day" if specific)
     }}
-    If dates are not specified, estimate based on historical context or use today.
     """
     model = genai.GenerativeModel('gemini-2.5-pro')
     response = model.generate_content(prompt)
@@ -69,6 +68,7 @@ def analyze_brief_for_specs(brief):
 # 🧠 THE CARTOGRAPHER FUNCTION (GEMINI)
 # ==============================================================================
 def run_cartographer(source_text):
+    # UPDATED PROMPT: Extract Granularity (Precision)
     prompt = f"""
     You are a Data Engineer. Extract a structured timeline from this text.
     
@@ -78,9 +78,14 @@ def run_cartographer(source_text):
     INSTRUCTIONS:
     1. Identify every MAJOR figure/entity and their location/date.
     2. Output a JSON list.
-    3. Keys: "character_name", "location", "start_date", "end_date".
-    4. CRITICAL: For BC dates, use the format "YYYY-MM-DD BC" (e.g. "0044-03-15 BC"). Do NOT use negative numbers.
-    5. If exact date is unknown, estimate the first of the month.
+    3. Keys: 
+       - "character_name"
+       - "location"
+       - "start_date" (Format: "YYYY-MM-DD" or "YYYY-MM-DD BC")
+       - "end_date"
+       - "granularity": "day" (if exact date known) OR "year" (if only year known)
+    4. CRITICAL: For BC dates, use "YYYY-MM-DD BC".
+    5. If only year is known: Set dates to Jan 1st - Dec 31st, but set "granularity": "year".
     6. JSON OUTPUT ONLY. No markdown.
     """
     
@@ -110,13 +115,14 @@ def run_cartographer(source_text):
             char_headers["Prefer"] = "resolution=ignore-duplicates"
             requests.post(f"{SUPABASE_URL}/rest/v1/characters", headers=char_headers, json=char_payload)
             
-            # STEP 2: INSERT TIMELINE EVENT
+            # STEP 2: INSERT TIMELINE EVENT (With Granularity)
             safe_loc = item.get('location') or "Unknown Location"
             payload = {
                 "character_name": char_name,
                 "location": safe_loc,
                 "start_date": item['start_date'],
-                "end_date": item['end_date']
+                "end_date": item['end_date'],
+                "granularity": item.get('granularity', 'day') # NEW FIELD
             }
             
             res = requests.post(f"{SUPABASE_URL}/rest/v1/timeline", headers=headers, json=payload)
@@ -155,7 +161,7 @@ with st.sidebar:
     )
     
     st.divider()
-    st.caption("Manual Overrides (Ignored if Auto-Detect works)")
+    st.caption("Manual Overrides")
     character = st.text_input("Character", "Napoleon")
     location = st.text_input("Location", "Paris")
     start_date = st.date_input("Start Date")
@@ -216,7 +222,6 @@ if st.button("🗺️ 1. Research & Map Territory"):
         if logs:
             st.divider()
             st.subheader("🛑 Error Console")
-            st.caption("Copy these errors to debug Supabase issues:")
             st.code("\n\n".join(logs), language="yaml")
             
     except Exception as e:
@@ -233,19 +238,20 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
         specs = analyze_brief_for_specs(mission_brief)
         
         if specs:
-            # Use Auto-Detected Specs
             check_char = specs.get("character_name", character)
             check_loc = specs.get("location", location)
             check_start = specs.get("start_date", str(start_date))
             check_end = specs.get("end_date", str(end_date))
-            st.caption(f"Checking Constraints: {check_char} in {check_loc} ({check_start})")
+            # Default to exact 'day' unless Gemini flagged it as vague
+            check_granularity = specs.get("granularity", "day")
+            st.caption(f"Checking: {check_char} in {check_loc} ({check_granularity})")
         else:
-            # Fallback to Sidebar
             check_char = character
             check_loc = location
             check_start = str(start_date)
             check_end = str(end_date)
-            st.warning("Could not auto-detect specs. Using Sidebar defaults.")
+            check_granularity = "day"
+            st.warning("Using Sidebar defaults.")
 
         # 2. PHYSICS CHECK
         status.info("🛡️ Checking Physics...")
@@ -261,10 +267,11 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
             "character_name": check_char,
             "location": check_loc,
             "start_date": check_start,
-            "end_date": check_end
+            "end_date": check_end,
+            "granularity": check_granularity # Sent to DB to trigger fuzzy logic
         }
         
-        # Check Character Registration first (to avoid FK error)
+        # Register Character
         char_reg = {"name": check_char, "role": "Protagonist"}
         reg_headers = supa_headers.copy()
         reg_headers["Prefer"] = "resolution=ignore-duplicates"
