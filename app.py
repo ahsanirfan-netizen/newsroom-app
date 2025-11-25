@@ -25,7 +25,7 @@ except Exception:
     st.error("Missing Keys! Check your .env file.")
     st.stop()
 
-st.set_page_config(page_title="Newsroom AI", page_icon="🏛️")
+st.set_page_config(page_title="Newsroom AI", page_icon="🏛️", layout="wide")
 st.title("🏛️ The Newsroom")
 
 try:
@@ -86,7 +86,7 @@ def run_cartographer(source_text):
         return 0, []
 
 # ==============================================================================
-# 📱 THE UI
+# 📱 THE SIDEBAR
 # ==============================================================================
 with st.sidebar:
     st.header("Draft New Book")
@@ -100,7 +100,7 @@ with st.sidebar:
     st.divider()
     st.header("Open Project")
     try:
-        # --- THE FIX IS HERE: Added &order=created_at.desc ---
+        # Fetch books sorted by newest
         books = requests.get(
             f"{SUPABASE_URL}/rest/v1/books?select=id,title&order=created_at.desc", 
             headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
@@ -111,7 +111,7 @@ with st.sidebar:
         selected_book = None
 
 # ==============================================================================
-# 🚀 MAIN LOGIC
+# 🚀 MAIN LOGIC (Project View)
 # ==============================================================================
 if selected_book:
     st.subheader(f"📖 {selected_book['title']}")
@@ -120,98 +120,104 @@ if selected_book:
     chapters = requests.get(f"{SUPABASE_URL}/rest/v1/table_of_contents?book_id=eq.{selected_book['id']}&order=chapter_number.asc", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}).json()
     
     for ch in chapters:
-        # Color code the status
-        status_icon = "✅" if ch['status'] == 'drafted' else "⚪"
+        # Status Indicator
+        status_icon = "✅" if ch.get('content') else "⚪"
         
         with st.expander(f"{status_icon} Chapter {ch['chapter_number']}: {ch['title']}"):
             st.write(f"**Goal:** {ch['summary_goal']}")
             
+            # Display Content if drafted
             if ch.get('content'):
                 st.markdown("---")
                 st.markdown(ch['content'])
             
+            # CHAPTER CONTROLS
             col1, col2 = st.columns(2)
             
-            # --- BUTTON 1: MAP ---
+            # 1. MAP BUTTON
             if col1.button("🗺️ Map", key=f"map_{ch['id']}"):
                 with st.spinner("Mapping..."):
                     search = exa.search_and_contents(f"History of {ch['title']}", type="neural", num_results=1, text=True)
                     count, _ = run_cartographer(search.results[0].text)
                     st.success(f"Mapped {count} events.")
 
-            # --- BUTTON 2: WRITE (WITH CONTEXT CHAIN) ---
+            # 2. WRITE BUTTON
             if col2.button("✍️ Write", key=f"write_{ch['id']}"):
                 with st.spinner("Writing..."):
-                    # A. GET PREVIOUS CHAPTER CONTEXT
+                    # A. Context Chain
                     context_prompt = ""
                     if ch['chapter_number'] > 1:
-                        # Look for the previous chapter in the list we already fetched
                         prev_ch = next((x for x in chapters if x['chapter_number'] == ch['chapter_number'] - 1), None)
                         if prev_ch and prev_ch.get('content'):
-                            # We feed the last 2000 chars of the previous chapter to keep context
-                            context_prompt = f"\n\nPREVIOUS CHAPTER CONTEXT:\n{prev_ch['content'][-2000:]}\n\n(Ensure continuity with the above event)."
+                            context_prompt = f"\n\nPREVIOUS CHAPTER CONTEXT:\n{prev_ch['content'][-2000:]}"
                             st.info(f"🔗 Linked to Chapter {prev_ch['chapter_number']}")
 
-                    # B. RESEARCH
+                    # B. Research
                     search = exa.search_and_contents(f"{selected_book['title']} {ch['title']}", type="neural", num_results=1, text=True)
                     source = search.results[0].text[:2000]
                     
-                    # C. WRITE
-                    prompt = f"""
-                    Write Chapter {ch['chapter_number']}: {ch['title']}.
-                    
-                    GOAL: {ch['summary_goal']}
-                    
-                    SOURCE MATERIAL:
-                    {source}
-                    {context_prompt}
-                    """
-                    
+                    # C. Write
+                    prompt = f"Write Chapter {ch['chapter_number']}: {ch['title']}. GOAL: {ch['summary_goal']}. SOURCE: {search.results[0].text[:2000]} {context_prompt}"
                     draft_resp = perplexity.chat.completions.create(
                         model="sonar-pro",
                         messages=[{"role": "user", "content": prompt}]
                     )
                     content = draft_resp.choices[0].message.content
                     
-                    # D. SAVE TO OUTLINE TABLE
-                    requests.patch(
-                        f"{SUPABASE_URL}/rest/v1/table_of_contents?id=eq.{ch['id']}", 
-                        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}, 
-                        json={"content": content, "status": "drafted"}
-                    )
+                    # D. Save (Dual Write: Archive + Outline)
+                    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
+                    requests.post(f"{SUPABASE_URL}/rest/v1/book_chapters", headers=headers, json={"topic": ch['title'], "content": content})
+                    requests.patch(f"{SUPABASE_URL}/rest/v1/table_of_contents?id=eq.{ch['id']}", headers=headers, json={"content": content, "status": "drafted"})
+                    
                     st.rerun()
-else:
-    st.info("👈 Create a new book in the sidebar to begin.")
-    # ... (This goes AFTER the chapter loop) ...
-    
+
+    # ==============================================================================
+    # 🖨️ PUBLISHER & TOOLS
+    # ==============================================================================
     st.divider()
-    st.header("🖨️ The Publisher")
+    st.header("🖨️ Publisher & Tools")
     
-    if st.button("📦 Compile Manuscript"):
-        # 1. Fetch all chapters sorted
-        full_text = f"# {selected_book['title']}\n\n"
-        
-        # We re-fetch to ensure we have the latest edits
-        final_chapters = requests.get(
-            f"{SUPABASE_URL}/rest/v1/table_of_contents?book_id=eq.{selected_book['id']}&order=chapter_number.asc", 
-            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-        ).json()
-        
-        # 2. Stitch them together
-        for ch in final_chapters:
-            if ch.get('content'):
-                full_text += f"## Chapter {ch['chapter_number']}: {ch['title']}\n\n"
-                full_text += f"{ch['content']}\n\n"
-                full_text += "---\n\n"
-        
-        # 3. Show Preview
-        with st.expander("Manuscript Preview"):
-            st.markdown(full_text)
+    # Split into two distinct columns to avoid accidental clicks
+    tool_col1, tool_col2 = st.columns(2)
+    
+    # --- COLUMN 1: MAINTENANCE ---
+    with tool_col1:
+        st.subheader("🛠️ Maintenance")
+        if st.button("🔄 Resync from Backups"):
+            with st.spinner("Searching archives..."):
+                # Fetch archives
+                backups = requests.get(f"{SUPABASE_URL}/rest/v1/book_chapters?select=topic,content", headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}).json()
+                headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}
+                
+                synced_count = 0
+                for ch in chapters:
+                    # Match Archive Topic to Outline Title
+                    match = next((b for b in backups if b['topic'] == ch['title']), None)
+                    if match and not ch.get('content'):
+                        requests.patch(f"{SUPABASE_URL}/rest/v1/table_of_contents?id=eq.{ch['id']}", headers=headers, json={"content": match['content'], "status": "drafted"})
+                        synced_count += 1
+                
+                if synced_count > 0:
+                    st.success(f"Restored {synced_count} chapters!")
+                    st.rerun()
+                else:
+                    st.info("No lost chapters found.")
+
+    # --- COLUMN 2: EXPORT ---
+    with tool_col2:
+        st.subheader("📦 Export")
+        if st.button("📄 Compile Manuscript"):
+            full_text = f"# {selected_book['title']}\n\n"
+            for ch in chapters:
+                if ch.get('content'):
+                    full_text += f"## Chapter {ch['chapter_number']}: {ch['title']}\n\n{ch['content']}\n\n---\n\n"
             
-        # 4. Download Button
-        st.download_button(
-            label="⬇️ Download Manuscript (.md)",
-            data=full_text,
-            file_name=f"{selected_book['title'].replace(' ', '_')}.md",
-            mime="text/markdown"
-        )
+            st.download_button(
+                label="⬇️ Download (.md)",
+                data=full_text,
+                file_name=f"{selected_book['title'].replace(' ', '_')}.md",
+                mime="text/markdown"
+            )
+
+else:
+    st.info("👈 Create or Select a Project to begin.")
