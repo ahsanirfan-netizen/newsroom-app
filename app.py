@@ -182,3 +182,36 @@ if selected_book:
                     st.rerun()
 else:
     st.info("👈 Create a new book in the sidebar to begin.")
+    # ... (This goes AFTER the chapter loop) ...
+    
+    st.divider()
+    st.header("🖨️ The Publisher")
+    
+    if st.button("📦 Compile Manuscript"):
+        # 1. Fetch all chapters sorted
+        full_text = f"# {selected_book['title']}\n\n"
+        
+        # We re-fetch to ensure we have the latest edits
+        final_chapters = requests.get(
+            f"{SUPABASE_URL}/rest/v1/table_of_contents?book_id=eq.{selected_book['id']}&order=chapter_number.asc", 
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+        ).json()
+        
+        # 2. Stitch them together
+        for ch in final_chapters:
+            if ch.get('content'):
+                full_text += f"## Chapter {ch['chapter_number']}: {ch['title']}\n\n"
+                full_text += f"{ch['content']}\n\n"
+                full_text += "---\n\n"
+        
+        # 3. Show Preview
+        with st.expander("Manuscript Preview"):
+            st.markdown(full_text)
+            
+        # 4. Download Button
+        st.download_button(
+            label="⬇️ Download Manuscript (.md)",
+            data=full_text,
+            file_name=f"{selected_book['title'].replace(' ', '_')}.md",
+            mime="text/markdown"
+        )
