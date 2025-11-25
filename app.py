@@ -53,8 +53,8 @@ def run_cartographer(source_text):
     INSTRUCTIONS:
     1. Identify every MAJOR figure/entity and their location/date.
     2. Output a JSON list.
-    3. Keys: "character_name", "location", "start_date" (YYYY-MM-DD), "end_date" (YYYY-MM-DD).
-    4. CRITICAL: For BC dates, use NEGATIVE years (e.g. -0044-03-15 for 44 BC).
+    3. Keys: "character_name", "location", "start_date", "end_date".
+    4. CRITICAL: For BC dates, use the format "YYYY-MM-DD BC" (e.g. "0044-03-15 BC"). Do NOT use negative numbers.
     5. If exact date is unknown, estimate the first of the month.
     6. JSON OUTPUT ONLY. No markdown.
     """
@@ -62,6 +62,7 @@ def run_cartographer(source_text):
     model = genai.GenerativeModel('gemini-2.5-pro') 
     response = model.generate_content(prompt)
     
+    # Clean the response to ensure valid JSON
     raw_json = response.text.replace("```json", "").replace("```", "").strip()
     
     try:
@@ -76,7 +77,7 @@ def run_cartographer(source_text):
         
         count = 0
         conflicts = []
-        error_logs = [] # NEW: Collection for verbose error logs
+        error_logs = [] 
         
         for item in data:
             # SAFETY CHECK: Handle NULL locations
@@ -107,6 +108,9 @@ def run_cartographer(source_text):
         return count, data, conflicts, error_logs
         
     except Exception as e:
+        # If JSON parsing fails entirely
+        st.error(f"JSON Parsing Error: {e}")
+        st.text(raw_json) # Show raw output for debugging
         raise e
 
 # ==============================================================================
@@ -155,6 +159,7 @@ if st.button("🗺️ 1. Research & Map Territory"):
     try:
         status.info(f"📚 Exa is processing brief...")
         
+        # Standard Neural Search (No autoprompt to prevent crash)
         search = exa.search_and_contents(
             mission_brief, 
             type="neural", 
@@ -170,7 +175,6 @@ if st.button("🗺️ 1. Research & Map Territory"):
         
         status.info("🧠 Gemini is extracting knowledge graph...")
         
-        # UPDATED: Receive 'logs' from the function
         count, data, conflicts, logs = run_cartographer(source_text)
         
         status.success(f"Success! Mapped {count} new events to the Physics Engine.")
@@ -183,7 +187,7 @@ if st.button("🗺️ 1. Research & Map Territory"):
             st.caption("Source Text Preview:")
             st.text(source_text[:500])
         
-        # NEW: ERROR LOG SECTION
+        # ERROR LOG SECTION
         if logs:
             st.divider()
             st.subheader("🛑 Error Console")
@@ -219,8 +223,6 @@ if st.button("✍️ 2. Write Chapter (With Physics Check)"):
         
         if check.status_code >= 400:
             st.error(f"🛑 PHYSICS VIOLATION: Chapter Blocked.")
-            
-            # NEW: ERROR LOG SECTION FOR WRITER
             st.divider()
             st.subheader("🛑 Error Console")
             st.code(
