@@ -62,7 +62,6 @@ def run_cartographer(source_text):
     model = genai.GenerativeModel('gemini-2.5-pro') 
     response = model.generate_content(prompt)
     
-    # Clean the response to ensure valid JSON
     raw_json = response.text.replace("```json", "").replace("```", "").strip()
     
     try:
@@ -80,11 +79,29 @@ def run_cartographer(source_text):
         error_logs = [] 
         
         for item in data:
-            # SAFETY CHECK: Handle NULL locations
+            char_name = item['character_name']
+            
+            # ---------------------------------------------------------
+            # STEP 1: UPSERT CHARACTER (Fixes Foreign Key Error)
+            # ---------------------------------------------------------
+            # We try to insert the character first. If they exist, we ignore the error.
+            char_payload = {
+                "name": char_name, 
+                "role": "Auto-Imported" 
+            }
+            # 'resolution=ignore-duplicates' prevents 409 errors if they already exist
+            char_headers = headers.copy()
+            char_headers["Prefer"] = "resolution=ignore-duplicates"
+            
+            requests.post(f"{SUPABASE_URL}/rest/v1/characters", headers=char_headers, json=char_payload)
+            
+            # ---------------------------------------------------------
+            # STEP 2: INSERT TIMELINE EVENT
+            # ---------------------------------------------------------
             safe_loc = item.get('location') or "Unknown Location"
-
+            
             payload = {
-                "character_name": item['character_name'],
+                "character_name": char_name,
                 "location": safe_loc,
                 "start_date": item['start_date'],
                 "end_date": item['end_date']
@@ -95,22 +112,20 @@ def run_cartographer(source_text):
             if res.status_code == 201:
                 count += 1
             elif res.status_code >= 400:
-                # Format a detailed error log for the UI
                 log_entry = (
-                    f"❌ FAILED: {item['character_name']} @ {safe_loc}\n"
+                    f"❌ FAILED: {char_name} @ {safe_loc}\n"
                     f"   Status: {res.status_code}\n"
                     f"   Response: {res.text}\n"
                     f"   Payload: {json.dumps(payload)}"
                 )
                 error_logs.append(log_entry)
-                conflicts.append(f"{item['character_name']} ({res.status_code})")
+                conflicts.append(f"{char_name} ({res.status_code})")
                 
         return count, data, conflicts, error_logs
         
     except Exception as e:
-        # If JSON parsing fails entirely
         st.error(f"JSON Parsing Error: {e}")
-        st.text(raw_json) # Show raw output for debugging
+        st.text(raw_json) 
         raise e
 
 # ==============================================================================
@@ -159,7 +174,6 @@ if st.button("🗺️ 1. Research & Map Territory"):
     try:
         status.info(f"📚 Exa is processing brief...")
         
-        # Standard Neural Search (No autoprompt to prevent crash)
         search = exa.search_and_contents(
             mission_brief, 
             type="neural", 
@@ -187,7 +201,6 @@ if st.button("🗺️ 1. Research & Map Territory"):
             st.caption("Source Text Preview:")
             st.text(source_text[:500])
         
-        # ERROR LOG SECTION
         if logs:
             st.divider()
             st.subheader("🛑 Error Console")
