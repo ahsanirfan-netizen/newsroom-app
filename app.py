@@ -12,7 +12,12 @@ from pydub import AudioSegment
 import io
 
 # ------------------------------------------------------------------
-# CONFIG & KEYS
+# 1. STREAMLIT CONFIG (MUST BE FIRST)
+# ------------------------------------------------------------------
+st.set_page_config(page_title="The Newsroom", page_icon="🏛️", layout="wide")
+
+# ------------------------------------------------------------------
+# 2. CONFIG & KEYS
 # ------------------------------------------------------------------
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
@@ -20,6 +25,7 @@ load_dotenv(env_path)
 gemini_key = os.getenv("GEMINI_API_KEY")
 exa_key = os.getenv("EXA_API_KEY")
 
+# Validate Keys (Safe to use st.error now)
 if not gemini_key:
     st.error("CRITICAL: GEMINI_API_KEY missing from .env")
     st.stop()
@@ -27,16 +33,19 @@ if not exa_key:
     st.error("CRITICAL: EXA_API_KEY missing from .env")
     st.stop()
 
-client = genai.Client(api_key=gemini_key)
-exa = Exa(api_key=exa_key)
-
-st.set_page_config(page_title="The Newsroom", page_icon="🏛️", layout="wide")
+# Initialize Clients
+try:
+    client = genai.Client(api_key=gemini_key)
+    exa = Exa(api_key=exa_key)
+except Exception as e:
+    st.error(f"Failed to initialize AI clients: {e}")
+    st.stop()
 
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"))
 
 # ------------------------------------------------------------------
-# SELF-HEALING SCHEMA
+# 3. SELF-HEALING SCHEMA
 # ------------------------------------------------------------------
 def run_schema_check():
     try:
@@ -95,6 +104,7 @@ def run_schema_check():
     except Exception as e:
         st.error(f"Schema Check Error: {e}")
 
+# Run checks
 run_schema_check()
 
 # ------------------------------------------------------------------
@@ -113,7 +123,7 @@ def generate_blueprint(topic, briefing):
         if search_response and search_response.results:
             for i, result in enumerate(search_response.results):
                 content_snippet = result.text[:2000] if result.text else "No text."
-                # Sanitize snippet to prevent F-string crashes in logs/display
+                # Sanitize
                 content_snippet = content_snippet.replace("{", "(").replace("}", ")")
                 dossier += f"\n--- SOURCE {i+1} ---\nTitle: {result.title}\nContent: {content_snippet}\n"
 
@@ -189,7 +199,6 @@ def generate_audio_chapter(text_content, voice_model="Puck"):
 def run_cartographer_task(chapter_id, book_id, content):
     try:
         # Prompt Gemini for structured data extraction
-        # Use safe concatenation for large text content
         prompt = "Analyze this text. Extract structured data.\nTEXT: " + content[:30000] + """
         
         OUTPUT JSON keys:
@@ -266,18 +275,15 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Get Book ID and the "Draft Content" (Summary)
         cur.execute("SELECT book_id, content FROM book_chapters WHERE id = %s", (chapter_id,))
         result = cur.fetchone()
         book_id = result[0]
         chapter_summary = result[1] 
         
-        # Get Characters
         cur.execute("SELECT name, role, description FROM characters WHERE book_id = %s", (book_id,))
         db_chars = cur.fetchall()
         char_context = "\n".join([f"- {c[0]} ({c[1]}): {c[2]}" for c in db_chars])
         
-        # Get Timeline
         cur.execute("SELECT start_date, location, character_name FROM timeline WHERE chapter_id = %s ORDER BY start_date", (chapter_id,))
         db_events = cur.fetchall()
         timeline_context = "\n".join([f"- {e[0]}: {e[2]} in {e[1]}" for e in db_events])
@@ -286,10 +292,9 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
         conn.close()
 
         # 2. DEEP RESEARCH (EXA)
-        # Query Exa using the Chapter Summary
         full_source_text = ""
         try:
-            # Safe replacement for curly braces in search query
+            # Safe strings for query
             safe_topic = chapter_topic.replace("{", "").replace("}", "")
             safe_summary = chapter_summary.replace("{", "").replace("}", "")
             exa_query = f"{safe_topic}: {safe_summary}"
@@ -304,10 +309,10 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
             print(f"Exa Research Error: {e}")
             full_source_text = "Internal knowledge only."
 
-        # 3. BUILD MASTER CONTEXT (Safe Concatenation)
-        # We concatenate large blocks to avoid F-string errors with raw text
+        # 3. BUILD MASTER CONTEXT
+        # Use safe concatenation
         MASTER_CONTEXT = f"BOOK: {book_context}\nCHAPTER: {chapter_topic}\nSUMMARY: {chapter_summary}\n\nCHARACTERS:\n{char_context}\n\nTIMELINE:\n{timeline_context}\n\nRESEARCH:\n"
-        MASTER_CONTEXT += full_source_text[:200000] # Append safe research text
+        MASTER_CONTEXT += full_source_text[:200000] 
 
         # 4. SUB-TOPIC PLANNING
         plan_prompt = f"""
@@ -339,23 +344,22 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
         for subtopic in subtopics:
             time.sleep(2) 
             
+            # Use safe concatenation for prompt to avoid F-string limits
             write_prompt = f"""
             Write a section of a history book.
-            
             CURRENT SUBTOPIC: {subtopic}
-            PREVIOUS SECTION SUMMARY: {previous_summary} (Maintain continuity).
-            
-            MASTER CONTEXT:
-            {MASTER_CONTEXT[:100000]} 
+            PREVIOUS SECTION SUMMARY: {previous_summary}
             
             INSTRUCTIONS:
             1. Write 500-1000 words of factual narrative.
-            2. Use the Research Sources provided.
+            2. Use the Research Sources provided below.
             3. Generate a summary for the next section.
             
-            OUTPUT JSON:
-            {{ "text": "...", "summary": "..." }}
+            OUTPUT JSON: {{ "text": "...", "summary": "..." }}
+            
+            MASTER CONTEXT:
             """
+            write_prompt += MASTER_CONTEXT[:100000]
             
             try:
                 response = client.models.generate_content(
@@ -368,7 +372,6 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
                 new_text = data.get("text", "")
                 new_summary = data.get("summary", "")
                 
-                # Append and Update DB
                 full_narrative += f"## {subtopic}\n{new_text}\n\n"
                 previous_summary = new_summary 
                 
@@ -388,19 +391,16 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
 # MAIN UI
 # ------------------------------------------------------------------
 def main():
-    st.title("🏛️ The Newsroom")
-    st.caption("Automated AI Book Publishing Platform")
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # SIDEBAR
+    # Sidebar
     st.sidebar.header("Library")
     if 'selected_book_id' not in st.session_state:
         st.session_state['selected_book_id'] = None
     if 'selected_book_title' not in st.session_state:
         st.session_state['selected_book_title'] = ""
 
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
     try:
         cur.execute("SELECT id, title FROM books ORDER BY id DESC")
         books = cur.fetchall()
@@ -459,7 +459,7 @@ def main():
     else:
         st.sidebar.info("No books yet.")
 
-    # MAIN CONTENT
+    # Main Content
     if st.session_state['selected_book_id']:
         st.header(f"📖 {st.session_state['selected_book_title']}")
         
@@ -490,4 +490,8 @@ def main():
 
                 st.divider()
 
-                b_col1, b_col2, b_col3, b_col4 
+                b_col1, b_col2, b_col3, b_col4 = st.columns(4)
+
+                with b_col1:
+                    # Map Button (Draft Phase)
+      
