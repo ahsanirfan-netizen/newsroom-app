@@ -4,6 +4,7 @@ import traceback
 import os
 import json
 import io
+import tempfile # <--- NEW IMPORT
 import google.generativeai as genai
 from exa_py import Exa
 from openai import OpenAI
@@ -13,11 +14,16 @@ from fpdf import FPDF
 from gtts import gTTS
 from pydub import AudioSegment
 from pydub.effects import normalize
+from pydub.utils import which
 
 # ==============================================================================
 # 🛠️ SETUP & KEYS
 # ==============================================================================
 load_dotenv()
+
+# FIX FOR FFPROBE ERROR: Explicitly find and set paths
+AudioSegment.converter = which("ffmpeg")
+AudioSegment.ffprobe = which("ffprobe")
 
 try:
     EXA_KEY = os.getenv("EXA_KEY")
@@ -35,6 +41,7 @@ st.title("🏛️ The Newsroom")
 
 try:
     exa = Exa(EXA_KEY)
+    # Perplexity client is initialized but unused for drafting now
     perplexity = OpenAI(api_key=PERPLEXITY_KEY, base_url="https://api.perplexity.ai")
     linkup = LinkupClient(api_key=LINKUP_KEY)
     genai.configure(api_key=GEMINI_KEY)
@@ -123,14 +130,12 @@ def create_pdf(book_title, chapters):
     return bytes(pdf.output()) 
 
 # ==============================================================================
-# 🎧 AUDIO ENGINEERING ENGINE (GEMINI TTS)
+# 🎧 AUDIO ENGINEERING ENGINE (ROBUST TEMP FILES)
 # ==============================================================================
 def chunk_text(text, max_chars=2000):
-    """Splits text into chunks, respecting sentence boundaries."""
     chunks = []
     current_chunk = ""
     sentences = text.split('. ')
-    
     for sentence in sentences:
         if len(current_chunk) + len(sentence) < max_chars:
             current_chunk += sentence + ". "
@@ -141,53 +146,41 @@ def chunk_text(text, max_chars=2000):
         chunks.append(current_chunk)
     return chunks
 
-def produce_audiobook(text, tld='us'):
-    """
-    1. Chunks text
-    2. Generates Audio for each chunk (Google TTS)
-    3. Stitches with Crossfade
-    4. Normalizes volume
-    """
+def produce_audiobook(text, voice_name):
     chunks = chunk_text(text)
     combined_audio = AudioSegment.empty()
     
-    temp_files = []
-    
-    try:
-        for i, chunk in enumerate(chunks):
-            # Generate raw MP3 for this chunk
-            tts = gTTS(text=chunk, lang='en', tld=tld, slow=False)
-            filename = f"temp_chunk_{i}.mp3"
-            tts.save(filename)
-            temp_files.append(filename)
-            
-            # Load into Pydub
-            segment = AudioSegment.from_mp3(filename)
-            
-            # Stitch with Crossfade (except first one)
-            if i == 0:
-                combined_audio += segment
-            else:
-                combined_audio = combined_audio.append(segment, crossfade=100) # 100ms crossfade
-        
-        # Normalize Audio (Even volume)
-        final_audio = normalize(combined_audio)
-        
-        # Export to Bytes
-        buffer = io.BytesIO()
-        final_audio.export(buffer, format="mp3")
-        buffer.seek(0)
-        
-        # Cleanup temp files
-        for f in temp_files:
-            if os.path.exists(f):
-                os.remove(f)
+    # Use a temporary directory for safe file creation
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            for i, chunk in enumerate(chunks):
+                tld_map = {
+                    "US English": "us", "British English": "co.uk", 
+                    "Australian English": "com.au", "Indian English": "co.in", 
+                    "South African": "co.za"
+                }
+                tld = tld_map.get(voice_name, "us")
                 
-        return buffer
-        
-    except Exception as e:
-        st.error(f"Audio Engineering Failed: {e}")
-        return None
+                tts = gTTS(text=chunk, lang='en', tld=tld, slow=False)
+                
+                # Save to the safe temp directory
+                filename = os.path.join(temp_dir, f"chunk_{i}.mp3")
+                tts.save(filename)
+                
+                segment = AudioSegment.from_mp3(filename)
+                if i == 0: combined_audio += segment
+                else: combined_audio = combined_audio.append(segment, crossfade=100)
+            
+            final_audio = normalize(combined_audio)
+            buffer = io.BytesIO()
+            final_audio.export(buffer, format="mp3")
+            buffer.seek(0)
+            return buffer
+            
+        except Exception as e:
+            st.error(f"Audio Engine Failure: {e}")
+            return None
+    # Temp dir cleans itself up automatically here
 
 # ==============================================================================
 # 📱 THE SIDEBAR
@@ -236,41 +229,25 @@ if selected_book:
                 st.markdown("---")
                 st.markdown(ch['content'])
                 
-                # --- AUDIO PRODUCTION SUITE ---
                 st.markdown("---")
-                st.subheader("🎧 Audio Production")
-                
+                st.subheader("🎧 Audiobook Generator")
                 col_audio_1, col_audio_2 = st.columns([3, 2])
-                
                 with col_audio_1:
-                    # Map TLDs to friendly names
-                    voice_options = {
-                        "US English": "us",
-                        "British English": "co.uk",
-                        "Australian English": "com.au",
-                        "Indian English": "co.in",
-                        "South African": "co.za"
-                    }
-                    selected_voice_name = st.selectbox("Narrator Accent", list(voice_options.keys()), key=f"v_{ch['id']}")
-                    selected_tld = voice_options[selected_voice_name]
-                
+                    voice_options = ["US English", "British English", "Australian English", "Indian English", "South African"]
+                    selected_voice = st.selectbox("Narrator Accent", voice_options, key=f"v_{ch['id']}")
                 with col_audio_2:
                     st.write("") 
-                    if st.button("🎙️ Produce Audiobook", key=f"tts_{ch['id']}"):
-                        with st.spinner("Chunking, Stitching & Mastering Audio..."):
-                            audio_buffer = produce_audiobook(ch['content'], tld=selected_tld)
-                            
-                            if audio_buffer:
-                                st.success("Mastering Complete.")
-                                st.audio(audio_buffer, format="audio/mp3")
-                                st.download_button(
-                                    label="⬇️ Download MP3",
-                                    data=audio_buffer,
-                                    file_name=f"Chapter_{ch['chapter_number']}_{selected_voice_name}.mp3",
-                                    mime="audio/mpeg"
-                                )
+                    if st.button("🎙️ Produce Audio", key=f"tts_{ch['id']}"):
+                        with st.spinner("Chunking, Stitching & Mastering..."):
+                            if ch['content']:
+                                audio_buffer = produce_audiobook(ch['content'][:20000], selected_voice) 
+                                if audio_buffer:
+                                    st.success("Mastering Complete.")
+                                    st.audio(audio_buffer, format="audio/mp3")
+                                    st.download_button(label="⬇️ Download MP3", data=audio_buffer, file_name=f"Ch_{ch['chapter_number']}.mp3", mime="audio/mpeg")
+                            else:
+                                st.error("No content to read!")
             
-            # ... (MAP and WRITE buttons remain same as before) ...
             col1, col2 = st.columns(2)
             if col1.button("🗺️ Map", key=f"map_{ch['id']}"):
                 with st.spinner("Reading 10 sources..."):
@@ -295,7 +272,7 @@ if selected_book:
                     search = exa.search_and_contents(search_query, type="neural", num_results=10, text=True) 
                     master_source = ""
                     for res in search.results:
-                        master_source += f"\n--- Source: {res.title} ---\n{res.text[:25000]}\n"
+                        master_source += f"\n--- Source: {res.title} ---\n{res.text[:50000]}\n"
                     
                     prompt = f"""
                     You are a professional non-fiction author. Write Chapter {ch['chapter_number']}: {ch['title']}.
