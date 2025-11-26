@@ -31,6 +31,7 @@ st.title("🏛️ The Newsroom")
 
 try:
     exa = Exa(EXA_KEY)
+    # We keep Perplexity client init just in case, but we won't use it for writing
     perplexity = OpenAI(api_key=PERPLEXITY_KEY, base_url="https://api.perplexity.ai")
     linkup = LinkupClient(api_key=LINKUP_KEY)
     genai.configure(api_key=GEMINI_KEY)
@@ -48,15 +49,16 @@ def run_architect(book_concept):
         search = exa.search_and_contents(
             f"Comprehensive history, timeline, and academic analysis of: {book_concept}",
             type="neural",
-            num_results=10, 
+            num_results=10, # <--- FETCH 10 SOURCES
             text=True
         )
         
         # 2. AGGREGATE: Stitch them into one massive context
         grounding_text = f"RESEARCH DOSSIER FOR: {book_concept}\n\n"
         for i, result in enumerate(search.results):
+            # We take up to 20,000 chars per source (Gemini Pro has 1M+ token window, so this is easy)
             grounding_text += f"--- SOURCE {i+1}: {result.title} ({result.url}) ---\n"
-            grounding_text += f"{result.text[:25000]}\n\n" # Cap each source to avoid overload, but huge limit
+            grounding_text += f"{result.text[:25000]}\n\n" # Large limit for deep reading
             
     except Exception as e:
         st.warning(f"Deep search failed ({e}). Relying on internal knowledge.")
@@ -98,7 +100,7 @@ def run_architect(book_concept):
         return False, str(e)
 
 def run_cartographer(source_text):
-    # NOTE: We increased the limit to 150,000 chars (roughly 30k tokens) to handle the 10 sources
+    # NOTE: We increased the limit to 150,000 chars to handle larger inputs if needed
     prompt = f"""
     Extract structured timeline. TEXT: {source_text[:150000]}
     JSON OUTPUT ONLY: [ {{"character_name": "...", "location": "...", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}} ]
@@ -220,31 +222,47 @@ if selected_book:
                     count, _ = run_cartographer(master_text)
                     st.success(f"Mapped {count} events from 10 sources.")
 
-            # 2. WRITE BUTTON
+            # 2. WRITE BUTTON (UPDATED FOR GEMINI WRITER)
             if col2.button("✍️ Write", key=f"write_{ch['id']}"):
-                with st.spinner("Writing..."):
+                with st.spinner("Researching & Writing (Gemini 2.5 Pro)..."):
                     # A. Context Chain
                     context_prompt = ""
                     if ch['chapter_number'] > 1:
                         prev_ch = next((x for x in chapters if x['chapter_number'] == ch['chapter_number'] - 1), None)
                         if prev_ch and prev_ch.get('content'):
-                            context_prompt = f"\n\nPREVIOUS CHAPTER CONTEXT:\n{prev_ch['content'][-2000:]}"
+                            context_prompt = f"\n\nPREVIOUS CHAPTER CONTEXT:\n{prev_ch['content'][-5000:]}" # Increased context
                             st.info(f"🔗 Linked to Chapter {prev_ch['chapter_number']}")
 
-                    # B. Research (Single shot for writing context)
+                    # B. Research (Deep Dive for Writing)
                     search_query = f"{mission_brief} {ch['title']}"
-                    search = exa.search_and_contents(search_query, type="neural", num_results=3, text=True) # Increased to 3 for writing too
-                    source = ""
-                    for res in search.results:
-                        source += f"{res.text[:2000]}\n"
+                    search = exa.search_and_contents(search_query, type="neural", num_results=10, text=True) # 10 Sources
                     
-                    # C. Write
-                    prompt = f"Write Chapter {ch['chapter_number']}: {ch['title']}. GOAL: {ch['summary_goal']}. SOURCE: {source} {context_prompt}"
-                    draft_resp = perplexity.chat.completions.create(
-                        model="sonar-pro",
-                        messages=[{"role": "user", "content": prompt}]
-                    )
-                    content = draft_resp.choices[0].message.content
+                    master_source = ""
+                    for res in search.results:
+                        master_source += f"\n--- Source: {res.title} ---\n{res.text[:25000]}\n"
+                    
+                    # C. Write (Using Gemini instead of Perplexity)
+                    prompt = f"""
+                    You are a professional non-fiction author. Write Chapter {ch['chapter_number']}: {ch['title']}.
+                    
+                    GOAL: {ch['summary_goal']}
+                    
+                    SOURCE MATERIAL (Use these facts):
+                    {master_source}
+                    
+                    {context_prompt}
+                    
+                    INSTRUCTIONS:
+                    1. Write a detailed, engaging narrative.
+                    2. Use ONLY the source material provided. Do not hallucinate dates or events.
+                    3. Ensure smooth continuity with the previous chapter.
+                    4. Aim for 2,000 - 4,000 words if the source material supports it.
+                    """
+                    
+                    # Using Gemini 2.5 Pro for writing
+                    model = genai.GenerativeModel('gemini-2.5-pro')
+                    response = model.generate_content(prompt)
+                    content = response.text
                     
                     # D. Save
                     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
