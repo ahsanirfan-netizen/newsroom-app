@@ -52,7 +52,6 @@ def run_architect(book_concept):
             text=True
         )
         
-        # 2. AGGREGATE: Stitch them into one massive context
         grounding_text = f"RESEARCH DOSSIER FOR: {book_concept}\n\n"
         for i, result in enumerate(search.results):
             grounding_text += f"--- SOURCE {i+1}: {result.title} ({result.url}) ---\n"
@@ -206,34 +205,27 @@ if selected_book:
             
             col1, col2 = st.columns(2)
             
-            # 1. MAP BUTTON (UPDATED FOR DEEP RESEARCH)
+            # 1. MAP BUTTON (Deep Research)
             if col1.button("🗺️ Map", key=f"map_{ch['id']}"):
                 with st.spinner("Reading 10 sources..."):
-                    # A. Fetch 10 Sources
                     search_query = f"{mission_brief} {ch['title']}"
                     search = exa.search_and_contents(search_query, type="neural", num_results=10, text=True)
                     
-                    # B. Stitch Texts
                     master_text = f"RESEARCH FOR {ch['title']}:\n"
                     for res in search.results:
                         master_text += f"\n--- Source: {res.title} ---\n{res.text}\n"
                     
-                    # C. Map
                     count, _ = run_cartographer(master_text)
                     st.success(f"Mapped {count} events from 10 sources.")
 
-            # 2. WRITE BUTTON (UPDATED FOR GEMINI WRITER + 9000 WORDS)
-            if col2.button("✍️ Write", key=f"write_{ch['id']}"):
-                with st.spinner("Researching & Writing (Gemini 2.5 Pro - Massive Mode)..."):
-                    # A. Context Chain
-                    context_prompt = ""
-                    if ch['chapter_number'] > 1:
-                        prev_ch = next((x for x in chapters if x['chapter_number'] == ch['chapter_number'] - 1), None)
-                        if prev_ch and prev_ch.get('content'):
-                            context_prompt = f"\n\nPREVIOUS CHAPTER CONTEXT:\n{prev_ch['content'][-5000:]}" 
-                            st.info(f"🔗 Linked to Chapter {prev_ch['chapter_number']}")
-
-                    # B. Research
+            # 2. WRITE BUTTON (FRACTAL WRITING)
+            if col2.button("✍️ Write (Fractal)", key=f"write_{ch['id']}"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                try:
+                    # --- STEP A: GATHER INTEL ---
+                    status_text.text("📚 Phase 1/3: Deep Researching...")
                     search_query = f"{mission_brief} {ch['title']}"
                     search = exa.search_and_contents(search_query, type="neural", num_results=10, text=True) 
                     
@@ -241,35 +233,89 @@ if selected_book:
                     for res in search.results:
                         master_source += f"\n--- Source: {res.title} ---\n{res.text[:25000]}\n"
                     
-                    # C. Write
-                    prompt = f"""
-                    You are a professional non-fiction author. Write Chapter {ch['chapter_number']}: {ch['title']}.
+                    # --- STEP B: BREAKDOWN (The Sub-Architect) ---
+                    status_text.text("🏗️ Phase 2/3: Breaking down chapter into scenes...")
+                    progress_bar.progress(10)
                     
+                    plan_prompt = f"""
+                    You are a Book Outliner. Break this chapter into 5-10 distinct SUB-TOPICS or SCENES.
+                    
+                    CHAPTER: {ch['title']}
                     GOAL: {ch['summary_goal']}
-                    
-                    SOURCE MATERIAL (Use these facts):
-                    {master_source}
-                    
-                    {context_prompt}
+                    SOURCE MATERIAL LENGTH: {len(master_source)} characters
                     
                     INSTRUCTIONS:
-                    1. Write a detailed, immersive, non-fiction narrative.
-                    2. **LENGTH REQUIREMENT:** Produce AT LEAST 9,000 words. This is a massive, deep-dive chapter. Do not summarize.
-                    3. Use ONLY the source material provided. Do not hallucinate dates or events.
-                    4. Write scene-by-scene, including dialogue where historically supported, and vivid sensory details.
-                    5. Ensure smooth continuity with the previous chapter.
+                    1. Each subtopic must cover a specific event or theme from the source material.
+                    2. The flow must be chronological and logical.
+                    3. JSON OUTPUT ONLY: ["Scene 1 Title", "Scene 2 Title", ...]
                     """
                     
                     model = genai.GenerativeModel('gemini-2.5-pro')
-                    response = model.generate_content(prompt)
-                    content = response.text
+                    plan_resp = model.generate_content(plan_prompt)
+                    clean_plan = plan_resp.text.replace("```json", "").replace("```", "").strip()
+                    subtopics = json.loads(clean_plan)
                     
-                    # D. Save
+                    st.write(f"**Plan:** {subtopics}") # Show the user the plan
+                    
+                    # --- STEP C: THE ASSEMBLY LINE (Write Each Scene) ---
+                    full_chapter_content = ""
+                    context_chain = ""
+                    
+                    # Get previous chapter context if available
+                    if ch['chapter_number'] > 1:
+                        prev_ch = next((x for x in chapters if x['chapter_number'] == ch['chapter_number'] - 1), None)
+                        if prev_ch and prev_ch.get('content'):
+                            context_chain = f"PREVIOUS CHAPTER SUMMARY: {prev_ch['content'][-3000:]}"
+
+                    for i, subtopic in enumerate(subtopics):
+                        status_text.text(f"✍️ Phase 3/3: Writing Section {i+1}/{len(subtopics)}: {subtopic}...")
+                        
+                        # Dynamic Context: We feed the end of the PREVIOUS section into the NEW section
+                        # This ensures Scene 2 flows naturally from Scene 1
+                        local_context = full_chapter_content[-2000:] if full_chapter_content else context_chain
+                        
+                        section_prompt = f"""
+                        You are writing a non-fiction narrative. Write ONE SECTION of the chapter.
+                        
+                        CHAPTER: {ch['title']}
+                        CURRENT SECTION TOPIC: {subtopic}
+                        
+                        CONTEXT (What just happened):
+                        {local_context}
+                        
+                        SOURCE MATERIAL (Use facts from here):
+                        {master_source}
+                        
+                        INSTRUCTIONS:
+                        1. Write 500-1000 words for this specific section.
+                        2. Focus deeply on this subtopic. Do not rush.
+                        3. Maintain a consistent narrative tone.
+                        4. Do not repeat information from the context.
+                        """
+                        
+                        section_resp = model.generate_content(section_prompt)
+                        section_text = section_resp.text
+                        
+                        full_chapter_content += f"\n\n### {subtopic}\n\n{section_text}"
+                        
+                        # Update Progress
+                        progress = int(((i + 1) / len(subtopics)) * 90) + 10
+                        progress_bar.progress(progress)
+                    
+                    # --- STEP D: SAVE ---
+                    status_text.text("💾 Saving full chapter...")
+                    
                     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
-                    requests.post(f"{SUPABASE_URL}/rest/v1/book_chapters", headers=headers, json={"topic": ch['title'], "content": content})
-                    requests.patch(f"{SUPABASE_URL}/rest/v1/table_of_contents?id=eq.{ch['id']}", headers=headers, json={"content": content, "status": "drafted"})
+                    requests.post(f"{SUPABASE_URL}/rest/v1/book_chapters", headers=headers, json={"topic": ch['title'], "content": full_chapter_content})
+                    requests.patch(f"{SUPABASE_URL}/rest/v1/table_of_contents?id=eq.{ch['id']}", headers=headers, json={"content": full_chapter_content, "status": "drafted"})
                     
+                    progress_bar.progress(100)
+                    status_text.success("Chapter Complete!")
                     st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"Fractal Writer Failed: {e}")
+                    st.code(traceback.format_exc())
 
     # ==============================================================================
     # 🖨️ PUBLISHER & TOOLS
@@ -332,3 +378,5 @@ if selected_book:
 
 else:
     st.info("👈 Create or Select a Project to begin.")
+
+
