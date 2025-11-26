@@ -41,6 +41,7 @@ def get_db_connection():
 def generate_blueprint(topic, briefing):
     """
     Uses Exa (Research) and Gemini (Planning) to create the TOC.
+    Returns a LIST of DICTIONARIES: [{'topic': '...', 'content': '...'}]
     """
     with st.spinner("🕵️ The Architect is researching via Exa..."):
         query = f"{topic}: {briefing}"
@@ -65,25 +66,33 @@ def generate_blueprint(topic, briefing):
         Research: {dossier}
         
         OUTPUT FORMAT:
-        Return ONLY a list of chapter topics, one per line.
-        No numbers, no bullets.
-        Generate 5-10 chapters.
+        Return a JSON list of objects. Each object must have the following keys:
+        - "topic": The title of the chapter.
+        - "content": A detailed paragraph outline describing what this chapter will cover.
+        
+        Generate between 5 and 10 chapters.
         """
         try:
+            # FIXED: Request JSON MIME type for structured output
             response = client.models.generate_content(
                 model="gemini-2.0-flash-exp", 
-                contents=prompt
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
             )
-            raw_text = response.text if response.text else ""
-            chapters = []
-            for line in raw_text.split('\n'):
-                clean = line.strip()
-                # Remove "1. ", "- ", etc.
-                while clean and (clean[0].isdigit() or clean[0] in ['.', '-', ' ']):
-                    clean = clean[1:].strip()
-                if clean:
-                    chapters.append(clean)
-            return chapters
+            
+            # Parse the JSON response
+            if response.text:
+                data = json.loads(response.text)
+                # Ensure it's a list (Gemini might wrap it in a root object sometimes)
+                if isinstance(data, list):
+                    return data
+                elif isinstance(data, dict):
+                    # Handle cases where it returns {"chapters": [...]}
+                    return data.get("chapters", list(data.values())[0])
+            return []
+            
         except Exception as e:
             st.error(f"Gemini Blueprint Error: {e}")
             return []
@@ -202,26 +211,29 @@ def main():
                 cur.execute("INSERT INTO books (title) VALUES (%s) RETURNING id", (new_topic,))
                 new_book_id = cur.fetchone()[0]
                 
-                # 2. Architect Agent (Research & Plan)
-                generated_chapters = generate_blueprint(new_topic, mission_brief)
+                # 2. Architect Agent (Now returns structured JSON)
+                generated_data = generate_blueprint(new_topic, mission_brief)
                 
-                # 3. Store Blueprint in Table of Contents (1-to-1 Relationship)
-                # We store the raw list as JSON for record-keeping
-                toc_json = json.dumps(generated_chapters)
+                # 3. Store Blueprint (TOC)
+                toc_json = json.dumps(generated_data)
                 cur.execute(
                     "INSERT INTO table_of_contents (book_id, content) VALUES (%s, %s)",
                     (new_book_id, toc_json)
                 )
 
-                # 4. Create Chapter Rows (1-to-Many Relationship)
-                for chapter_title in generated_chapters:
+                # 4. Insert Chapters (FIXED: Using JSON keys 'topic' and 'content')
+                for chapter in generated_data:
+                    # 'chapter' is now a dictionary: {'topic': '...', 'content': '...'}
+                    topic_text = chapter.get('topic', 'Untitled Chapter')
+                    outline_text = chapter.get('content', '') # Fills the NOT NULL column
+                    
                     cur.execute(
-                        "INSERT INTO book_chapters (book_id, topic, status) VALUES (%s, %s, 'Draft')", 
-                        (new_book_id, chapter_title)
+                        "INSERT INTO book_chapters (book_id, topic, status, content) VALUES (%s, %s, 'Draft', %s)", 
+                        (new_book_id, topic_text, outline_text)
                     )
                 
                 conn.commit()
-                st.success(f"Blueprint Created: {len(generated_chapters)} Chapters")
+                st.success(f"Blueprint Created: {len(generated_data)} Chapters")
                 time.sleep(1)
                 st.rerun()
             else:
@@ -237,7 +249,6 @@ def main():
         st.sidebar.markdown("---")
         
         # FETCH CHAPTERS
-        # Uses the 'book_id' Foreign Key to filter chapters for the selected book
         cur.execute("SELECT id, topic, status, content FROM book_chapters WHERE book_id = %s ORDER BY id", (selected_id,))
         chapters = cur.fetchall()
         
@@ -245,10 +256,13 @@ def main():
             with st.expander(f"{ch_topic} [{ch_status}]"):
                 
                 if ch_status in ["Draft", "Error"]:
+                    # Show the outline if available
+                    if ch_content:
+                        st.caption(f"Outline: {ch_content[:100]}...")
+                        
                     if st.button(f"Write Chapter", key=f"write_{ch_id}"):
                         t = threading.Thread(
                             target=background_writer_task, 
-                            # We pass the chapter ID (PK) for updates, and book topic for context
                             args=(ch_id, ch_topic, st.session_state.get('book_topic'))
                         )
                         t.start()
