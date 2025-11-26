@@ -150,7 +150,7 @@ def main():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # 1. UPDATED QUERY: Fetch from 'books' instead of 'projects'
+    # Fetch from 'books'
     cur.execute("SELECT id, title FROM books ORDER BY id DESC")
     books = cur.fetchall()
     
@@ -158,12 +158,11 @@ def main():
     with st.sidebar.expander("New Book"):
         new_topic = st.text_input("Topic")
         if st.button("Draft Blueprint"):
-            # 2. UPDATED QUERY: Insert into 'books'
             cur.execute("INSERT INTO books (title) VALUES (%s) RETURNING id", (new_topic,))
             new_id = cur.fetchone()[0]
             
-            # 3. UPDATED QUERY: Use 'book_id' foreign key
-            cur.execute("INSERT INTO book_chapters (book_id, title, status) VALUES (%s, %s, 'Draft')", (new_id, "Chapter 1: The Spark"))
+            # FIXED: Insert into 'topic' instead of 'title'
+            cur.execute("INSERT INTO book_chapters (book_id, topic, status) VALUES (%s, %s, 'Draft')", (new_id, "Chapter 1: The Spark"))
             conn.commit()
             st.rerun()
 
@@ -176,20 +175,20 @@ def main():
         
         st.sidebar.markdown("---")
         
-        # 4. UPDATED QUERY: Filter by 'book_id'
-        cur.execute("SELECT id, title, status, content FROM book_chapters WHERE book_id = %s ORDER BY id", (selected_id,))
+        # FIXED: Select 'topic' instead of 'title'
+        cur.execute("SELECT id, topic, status, content FROM book_chapters WHERE book_id = %s ORDER BY id", (selected_id,))
         chapters = cur.fetchall()
         
         # Display Chapters
-        for ch_id, ch_title, ch_status, ch_content in chapters:
-            with st.expander(f"{ch_title} [{ch_status}]", expanded=True):
+        for ch_id, ch_topic, ch_status, ch_content in chapters:
+            with st.expander(f"{ch_topic} [{ch_status}]", expanded=True):
                 
                 # STATUS: DRAFT or ERROR
                 if ch_status in ["Draft", "Error"]:
-                    if st.button(f"Write '{ch_title}'", key=f"write_{ch_id}"):
+                    if st.button(f"Write '{ch_topic}'", key=f"write_{ch_id}"):
                         t = threading.Thread(
                             target=background_writer_task, 
-                            args=(ch_id, ch_title, st.session_state.get('book_topic'))
+                            args=(ch_id, ch_topic, st.session_state.get('book_topic'))
                         )
                         t.start()
                         st.rerun()
@@ -207,12 +206,12 @@ def main():
                 # STATUS: COMPLETED
                 elif ch_status == "Completed":
                     st.success("Chapter Written")
-                    st.download_button("Download Text", ch_content, file_name=f"{ch_title}.md")
+                    st.download_button("Download Text", ch_content, file_name=f"{ch_topic}.md")
                     
                     if st.button(f"Produce Audio", key=f"audio_{ch_id}"):
                         audio_data = generate_audio_chapter(ch_content)
                         st.audio(audio_data, format='audio/mp3')
-                        st.download_button("Download MP3", audio_data, file_name=f"{ch_title}.mp3")
+                        st.download_button("Download MP3", audio_data, file_name=f"{ch_topic}.mp3")
 
     cur.close()
     conn.close()
