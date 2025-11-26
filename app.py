@@ -98,7 +98,7 @@ def run_schema_check():
 run_schema_check()
 
 # ------------------------------------------------------------------
-# AGENT 0: THE ARCHITECT
+# AGENT 0: THE ARCHITECT (Blueprinting)
 # ------------------------------------------------------------------
 def generate_blueprint(topic, briefing):
     with st.spinner("🕵️ The Architect is researching via Exa..."):
@@ -182,12 +182,17 @@ def generate_audio_chapter(text_content, voice_model="Puck"):
     return output_buffer
 
 # ------------------------------------------------------------------
-# AGENT 3: THE CARTOGRAPHER
+# AGENT 3: THE CARTOGRAPHER (Mapping)
 # ------------------------------------------------------------------
 def run_cartographer_task(chapter_id, book_id, content):
+    """
+    Extracts entities and timeline events from chapter text (or outline).
+    Populates 'characters' and 'timeline' tables.
+    """
     try:
+        # Prompt Gemini for structured data extraction
         prompt = f"""
-        Analyze this text. Extract structured data.
+        Analyze this text (Chapter Outline or Draft). Extract structured data.
         TEXT: {content[:30000]}
         
         OUTPUT JSON keys:
@@ -204,20 +209,29 @@ def run_cartographer_task(chapter_id, book_id, content):
         conn = get_db_connection()
         cur = conn.cursor()
 
+        # Insert Characters
         chars_count = 0
         for char in data.get("characters", []):
             cur.execute("""
                 INSERT INTO characters (name, role, description, book_id)
                 VALUES (%s, %s, %s, %s)
-            """, (char['name'], char['role'], char['description'], book_id))
+            """, (char.get('name'), char.get('role'), char.get('description'), book_id))
             chars_count += 1
 
+        # Insert Timeline Events
         events_count = 0
         for event in data.get("timeline", []):
             cur.execute("""
                 INSERT INTO timeline (character_name, location, start_date, end_date, book_id, chapter_id)
                 VALUES (%s, %s, %s, %s, %s, %s)
-            """, (event['character_name'], event['location'], event['start_date'], event['end_date'], book_id, chapter_id))
+            """, (
+                event.get('character_name'), 
+                event.get('location'), 
+                event.get('start_date'), 
+                event.get('end_date'), 
+                book_id, 
+                chapter_id
+            ))
             events_count += 1
 
         conn.commit()
@@ -230,7 +244,7 @@ def run_cartographer_task(chapter_id, book_id, content):
         return 0, 0
 
 # ------------------------------------------------------------------
-# AGENT 2: THE WRITER (Background)
+# AGENT 2: THE WRITER (Background Task)
 # ------------------------------------------------------------------
 def update_chapter_status(chapter_id, status, content=None):
     try:
@@ -280,7 +294,6 @@ def main():
     # ----------------------------------------------------------------
     st.sidebar.header("Library")
     
-    # Initialize session state for selection
     if 'selected_book_id' not in st.session_state:
         st.session_state['selected_book_id'] = None
     if 'selected_book_title' not in st.session_state:
@@ -313,7 +326,6 @@ def main():
                         (new_book_id, chapter.get('topic'), chapter.get('content'))
                     )
                 conn.commit()
-                # Auto-select the new book
                 st.session_state['selected_book_id'] = new_book_id
                 st.session_state['selected_book_title'] = new_topic
                 st.success(f"Blueprint Created: {len(generated_data)} Chapters")
@@ -324,14 +336,10 @@ def main():
 
     st.sidebar.markdown("---")
 
-    # BOOK LIST CONTAINER (Replaces Dropdown)
+    # BOOK LIST CONTAINER
     if books:
         for book_id, book_title in books:
-            # Create a compact row layout
             col1, col2 = st.sidebar.columns([4, 1])
-            
-            # Button 1: Open Book
-            # Highlight the currently selected book visually with an emoji or style
             label = f"📂 {book_title}" if st.session_state['selected_book_id'] == book_id else f"📄 {book_title}"
             
             if col1.button(label, key=f"open_book_{book_id}"):
@@ -339,21 +347,18 @@ def main():
                 st.session_state['selected_book_title'] = book_title
                 st.rerun()
 
-            # Button 2: Delete Book
             if col2.button("🗑️", key=f"del_book_{book_id}", help="Delete Book"):
                 try:
                     cur.execute("DELETE FROM books WHERE id = %s", (book_id,))
                     conn.commit()
-                    # Reset selection if we deleted the active book
                     if st.session_state['selected_book_id'] == book_id:
                         st.session_state['selected_book_id'] = None
                         st.session_state['selected_book_title'] = ""
                     st.rerun()
                 except Exception as e:
                     st.sidebar.error(f"Delete failed: {e}")
-
     else:
-        st.sidebar.info("No books yet. Create one above!")
+        st.sidebar.info("No books yet.")
 
     # ----------------------------------------------------------------
     # MAIN PAGE: Chapter Interface
@@ -365,36 +370,46 @@ def main():
         chapters = cur.fetchall()
         
         if not chapters:
-            st.info("This book has no chapters. Try re-generating the blueprint.")
+            st.info("No chapters found.")
         
         for ch_id, ch_topic, ch_status, ch_content in chapters:
-            # Chapter Container
             with st.expander(f"{ch_topic} [{ch_status}]"):
                 
-                # 1. Content Display
+                # Content Rendering
                 if ch_status == "Draft":
                     st.caption("📝 **Outline:**")
                     st.write(ch_content if ch_content else "No outline available.")
-                    
                 elif ch_status == "Processing":
                     st.info("AI Writer is active...")
                     st.progress(60)
-                    if ch_content:
-                        st.caption(f"Drafting... ({len(ch_content.split())} words)")
                     time.sleep(3)
                     st.rerun()
-                    
                 elif ch_status == "Completed":
                     st.caption("✅ **Final Draft:**")
                     st.markdown(ch_content[:500] + "...\n\n*(Preview truncated)*")
 
                 st.divider()
 
-                # 2. Action Buttons (Below Outline/Content)
-                col1, col2, col3, col4 = st.columns(4)
+                # ACTION BUTTONS
+                # Layout: 4 Columns
+                b_col1, b_col2, b_col3, b_col4 = st.columns(4)
 
-                with col1:
-                    if ch_status in ["Draft", "Error"]:
+                # SECTION 1: PLANNING (Draft State Only)
+                if ch_status in ["Draft", "Error"]:
+                    with b_col1:
+                        # 1. MAP BUTTON (Cartographer)
+                        # Maps the OUTLINE before writing
+                        if st.button("🗺️ Map Plan", key=f"map_{ch_id}"):
+                            with st.spinner("Cartographer is mapping the outline..."):
+                                n_chars, n_events = run_cartographer_task(
+                                    ch_id, 
+                                    st.session_state['selected_book_id'], 
+                                    ch_content # Passing the Outline
+                                )
+                                st.success(f"Mapped: {n_chars} Chars, {n_events} Events")
+                    
+                    with b_col2:
+                        # 2. WRITE BUTTON (Writer)
                         if st.button("✍️ Write Chapter", key=f"write_{ch_id}"):
                             t = threading.Thread(
                                 target=background_writer_task, 
@@ -403,25 +418,18 @@ def main():
                             t.start()
                             st.rerun()
 
-                with col2:
-                    if ch_status == "Completed":
-                        st.download_button("📥 Download Text", ch_content, file_name=f"{ch_topic}.md")
+                # SECTION 2: PRODUCTION (Completed State Only)
+                if ch_status == "Completed":
+                    with b_col3:
+                        st.download_button("📥 Text", ch_content, file_name=f"{ch_topic}.md")
 
-                with col3:
-                    if ch_status == "Completed":
-                        if st.button("🎧 Generate Audio", key=f"audio_{ch_id}"):
+                    with b_col4:
+                        if st.button("🎧 Audio", key=f"audio_{ch_id}"):
                             audio_data = generate_audio_chapter(ch_content)
                             st.audio(audio_data, format='audio/mp3')
-
-                with col4:
-                    if ch_status == "Completed":
-                        if st.button("🗺️ Map Chapter", key=f"map_{ch_id}"):
-                            with st.spinner("Cartographer is extracting data..."):
-                                n_chars, n_events = run_cartographer_task(ch_id, st.session_state['selected_book_id'], ch_content)
-                                st.success(f"Extracted: {n_chars} Characters, {n_events} Events")
     
     else:
-        st.info("👈 Please select a book from the Library sidebar to view its chapters.")
+        st.info("👈 Please select a book from the sidebar.")
 
     cur.close()
     conn.close()
