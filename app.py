@@ -41,16 +41,47 @@ except Exception as e:
 # 🧠 HELPER FUNCTIONS
 # ==============================================================================
 def run_architect(book_concept):
+    # 1. DEEP GROUNDING: Fetch 10 distinct sources
+    st.info(f"🔎 Architect is reading 10 sources for: {book_concept}...")
+    
+    try:
+        search = exa.search_and_contents(
+            f"Comprehensive history, timeline, and academic analysis of: {book_concept}",
+            type="neural",
+            num_results=10, # <--- FETCH 10 SOURCES
+            text=True
+        )
+        
+        # 2. AGGREGATE: Stitch them into one massive context
+        grounding_text = f"RESEARCH DOSSIER FOR: {book_concept}\n\n"
+        for i, result in enumerate(search.results):
+            # We take up to 20,000 chars per source (Gemini Pro has 1M+ token window, so this is easy)
+            grounding_text += f"--- SOURCE {i+1}: {result.title} ({result.url}) ---\n"
+            grounding_text += f"{result.text[:20000]}\n\n"
+            
+    except Exception as e:
+        st.warning(f"Deep search failed ({e}). Relying on internal knowledge.")
+        grounding_text = "No external sources found."
+
+    # 3. PLANNING: Use the Master Dossier
     prompt = f"""
     Act as a Senior Book Editor. Create a comprehensive Outline.
+    
     BOOK CONCEPT: "{book_concept}"
+    
+    MASTER RESEARCH DOSSIER (Use this for absolute accuracy):
+    {grounding_text}
+    
     INSTRUCTIONS:
-    1. Create a logical flow of 5 to 10 chapters.
-    2. JSON OUTPUT ONLY: [ {{"chapter_number": 1, "title": "...", "summary_goal": "..."}} ]
+    1. Synthesize the 10 sources into a logical flow of 5 to 15 chapters.
+    2. Ensure no major historical events from the sources are missed.
+    3. JSON OUTPUT ONLY: [ {{"chapter_number": 1, "title": "...", "summary_goal": "..."}} ]
     """
+    
     model = genai.GenerativeModel('gemini-2.5-pro') 
     response = model.generate_content(prompt)
     raw_json = response.text.replace("```json", "").replace("```", "").strip()
+    
     try:
         chapters = json.loads(raw_json)
         headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=representation"}
@@ -93,7 +124,6 @@ def create_pdf(book_title, chapters):
     # Title Page
     pdf.add_page()
     pdf.set_font("helvetica", "B", 24)
-    # Use encode/decode to strip unprintable characters (Fixes bytearray error)
     clean_title = book_title.encode('latin-1', 'replace').decode('latin-1')
     pdf.multi_cell(0, 60, clean_title, align="C")
     pdf.ln(20)
@@ -113,11 +143,10 @@ def create_pdf(book_title, chapters):
             
             # Chapter Body
             pdf.set_font("times", "", 12)
-            # Robust cleaning: replaces emojis/fancy quotes with '?' instead of crashing
             safe_text = ch['content'].encode('latin-1', 'replace').decode('latin-1')
             pdf.multi_cell(0, 10, safe_text)
             
-    return pdf.output()
+    return bytes(pdf.output()) 
 
 # ==============================================================================
 # 📱 THE SIDEBAR
@@ -125,8 +154,8 @@ def create_pdf(book_title, chapters):
 with st.sidebar:
     st.header("Draft New Book")
     book_concept = st.text_area("Concept", "History of the Silk Road")
-    if st.button("🏗️ Draft Blueprint"):
-        with st.spinner("Architecting..."):
+    if st.button("🏗️ Draft Blueprint (Deep Research)"):
+        with st.spinner("Reading 10 sources & Architecting..."):
             success, err = run_architect(book_concept)
             if success: st.rerun()
             else: st.error(err)
@@ -178,7 +207,6 @@ if selected_book:
             # 1. MAP BUTTON
             if col1.button("🗺️ Map", key=f"map_{ch['id']}"):
                 with st.spinner("Mapping..."):
-                    # Use Mission Brief + Chapter Title for better search
                     search_query = f"{mission_brief} {ch['title']}"
                     search = exa.search_and_contents(search_query, type="neural", num_results=1, text=True)
                     count, _ = run_cartographer(search.results[0].text)
