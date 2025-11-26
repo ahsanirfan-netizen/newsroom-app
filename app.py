@@ -31,7 +31,6 @@ st.title("🏛️ The Newsroom")
 
 try:
     exa = Exa(EXA_KEY)
-    # We keep Perplexity client init just in case, but we won't use it for writing
     perplexity = OpenAI(api_key=PERPLEXITY_KEY, base_url="https://api.perplexity.ai")
     linkup = LinkupClient(api_key=LINKUP_KEY)
     genai.configure(api_key=GEMINI_KEY)
@@ -58,7 +57,7 @@ def run_architect(book_concept):
         for i, result in enumerate(search.results):
             # We take up to 20,000 chars per source (Gemini Pro has 1M+ token window, so this is easy)
             grounding_text += f"--- SOURCE {i+1}: {result.title} ({result.url}) ---\n"
-            grounding_text += f"{result.text[:25000]}\n\n" # Large limit for deep reading
+            grounding_text += f"{result.text[:25000]}\n\n"
             
     except Exception as e:
         st.warning(f"Deep search failed ({e}). Relying on internal knowledge.")
@@ -222,9 +221,9 @@ if selected_book:
                     count, _ = run_cartographer(master_text)
                     st.success(f"Mapped {count} events from 10 sources.")
 
-            # 2. WRITE BUTTON (UPDATED FOR GEMINI WRITER)
+            # 2. WRITE BUTTON (UPDATED FOR GEMINI WRITER + LENGTH)
             if col2.button("✍️ Write", key=f"write_{ch['id']}"):
-                with st.spinner("Researching & Writing (Gemini 2.5 Pro)..."):
+                with st.spinner("Researching & Writing (Gemini 2.5 Pro - Long Form)..."):
                     # A. Context Chain
                     context_prompt = ""
                     if ch['chapter_number'] > 1:
@@ -253,10 +252,11 @@ if selected_book:
                     {context_prompt}
                     
                     INSTRUCTIONS:
-                    1. Write a detailed, engaging narrative.
-                    2. Use ONLY the source material provided. Do not hallucinate dates or events.
-                    3. Ensure smooth continuity with the previous chapter.
-                    4. Aim for 2,000 - 4,000 words if the source material supports it.
+                    1. Write a detailed, immersive, non-fiction narrative.
+                    2. **LENGTH REQUIREMENT:** Produce AT LEAST 4,500 words. This is a strict requirement. Do not summarize.
+                    3. Use ONLY the source material provided. Do not hallucinate dates or events.
+                    4. Write scene-by-scene, including dialogue where historically supported, and vivid sensory details.
+                    5. Ensure smooth continuity with the previous chapter.
                     """
                     
                     # Using Gemini 2.5 Pro for writing
@@ -332,5 +332,3 @@ if selected_book:
 
 else:
     st.info("👈 Create or Select a Project to begin.")
-
-
