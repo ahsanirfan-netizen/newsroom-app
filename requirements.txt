@@ -4,9 +4,9 @@ exa_py
 openai
 linkup-sdk
 google-generativeai>=0.8.0
+google-genai
 python-dotenv
 pydantic
 psycopg2-binary
 fpdf2
-gTTS
 pydub
