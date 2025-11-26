@@ -48,16 +48,15 @@ def run_architect(book_concept):
         search = exa.search_and_contents(
             f"Comprehensive history, timeline, and academic analysis of: {book_concept}",
             type="neural",
-            num_results=10, # <--- FETCH 10 SOURCES
+            num_results=10, 
             text=True
         )
         
         # 2. AGGREGATE: Stitch them into one massive context
         grounding_text = f"RESEARCH DOSSIER FOR: {book_concept}\n\n"
         for i, result in enumerate(search.results):
-            # We take up to 20,000 chars per source (Gemini Pro has 1M+ token window, so this is easy)
             grounding_text += f"--- SOURCE {i+1}: {result.title} ({result.url}) ---\n"
-            grounding_text += f"{result.text[:20000]}\n\n"
+            grounding_text += f"{result.text[:25000]}\n\n" # Cap each source to avoid overload, but huge limit
             
     except Exception as e:
         st.warning(f"Deep search failed ({e}). Relying on internal knowledge.")
@@ -99,8 +98,9 @@ def run_architect(book_concept):
         return False, str(e)
 
 def run_cartographer(source_text):
+    # NOTE: We increased the limit to 150,000 chars (roughly 30k tokens) to handle the 10 sources
     prompt = f"""
-    Extract structured timeline. TEXT: {source_text[:5000]}
+    Extract structured timeline. TEXT: {source_text[:150000]}
     JSON OUTPUT ONLY: [ {{"character_name": "...", "location": "...", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}} ]
     """
     model = genai.GenerativeModel('gemini-2.5-pro') 
@@ -204,13 +204,21 @@ if selected_book:
             
             col1, col2 = st.columns(2)
             
-            # 1. MAP BUTTON
+            # 1. MAP BUTTON (UPDATED FOR DEEP RESEARCH)
             if col1.button("🗺️ Map", key=f"map_{ch['id']}"):
-                with st.spinner("Mapping..."):
+                with st.spinner("Reading 10 sources..."):
+                    # A. Fetch 10 Sources
                     search_query = f"{mission_brief} {ch['title']}"
-                    search = exa.search_and_contents(search_query, type="neural", num_results=1, text=True)
-                    count, _ = run_cartographer(search.results[0].text)
-                    st.success(f"Mapped {count} events.")
+                    search = exa.search_and_contents(search_query, type="neural", num_results=10, text=True)
+                    
+                    # B. Stitch Texts
+                    master_text = f"RESEARCH FOR {ch['title']}:\n"
+                    for res in search.results:
+                        master_text += f"\n--- Source: {res.title} ---\n{res.text}\n"
+                    
+                    # C. Map
+                    count, _ = run_cartographer(master_text)
+                    st.success(f"Mapped {count} events from 10 sources.")
 
             # 2. WRITE BUTTON
             if col2.button("✍️ Write", key=f"write_{ch['id']}"):
@@ -223,13 +231,15 @@ if selected_book:
                             context_prompt = f"\n\nPREVIOUS CHAPTER CONTEXT:\n{prev_ch['content'][-2000:]}"
                             st.info(f"🔗 Linked to Chapter {prev_ch['chapter_number']}")
 
-                    # B. Research
+                    # B. Research (Single shot for writing context)
                     search_query = f"{mission_brief} {ch['title']}"
-                    search = exa.search_and_contents(search_query, type="neural", num_results=1, text=True)
-                    source = search.results[0].text[:2000]
+                    search = exa.search_and_contents(search_query, type="neural", num_results=3, text=True) # Increased to 3 for writing too
+                    source = ""
+                    for res in search.results:
+                        source += f"{res.text[:2000]}\n"
                     
                     # C. Write
-                    prompt = f"Write Chapter {ch['chapter_number']}: {ch['title']}. GOAL: {ch['summary_goal']}. SOURCE: {search.results[0].text[:2000]} {context_prompt}"
+                    prompt = f"Write Chapter {ch['chapter_number']}: {ch['title']}. GOAL: {ch['summary_goal']}. SOURCE: {source} {context_prompt}"
                     draft_resp = perplexity.chat.completions.create(
                         model="sonar-pro",
                         messages=[{"role": "user", "content": prompt}]
