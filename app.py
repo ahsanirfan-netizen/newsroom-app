@@ -161,8 +161,8 @@ def main():
             cur.execute("INSERT INTO books (title) VALUES (%s) RETURNING id", (new_topic,))
             new_id = cur.fetchone()[0]
             
-            # FIXED: Insert into 'topic' instead of 'title'
-            cur.execute("INSERT INTO book_chapters (book_id, topic, status) VALUES (%s, %s, 'Draft')", (new_id, "Chapter 1: The Spark"))
+            # FIXED: 'book_id' is just 'id' as per instruction
+            cur.execute("INSERT INTO book_chapters (id, topic, status) VALUES (%s, %s, 'Draft')", (new_id, "Chapter 1: The Spark"))
             conn.commit()
             st.rerun()
 
@@ -175,8 +175,8 @@ def main():
         
         st.sidebar.markdown("---")
         
-        # FIXED: Select 'topic' instead of 'title'
-        cur.execute("SELECT id, topic, status, content FROM book_chapters WHERE book_id = %s ORDER BY id", (selected_id,))
+        # FIXED: WHERE id = %s matches the Book ID
+        cur.execute("SELECT id, topic, status, content FROM book_chapters WHERE id = %s ORDER BY id", (selected_id,))
         chapters = cur.fetchall()
         
         # Display Chapters
