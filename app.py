@@ -1,99 +1,220 @@
-import threading
+import os
 import time
+import threading
+import psycopg2
 import streamlit as st
-# ... other imports (psycopg2, google_genai, etc.) ...
+from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+from pydub import AudioSegment
+import io
+import requests
+
+# Load Environment Variables
+load_dotenv()
+
+# Initialize Gemini Client (v1 SDK)
+# Ensure GEMINI_API_KEY is set in your .env file
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ------------------------------------------------------------------
-# BACKGROUND WORKER: The Writer Agent
+# DATABASE & SETUP
 # ------------------------------------------------------------------
+st.set_page_config(page_title="The Newsroom", page_icon="🏛️", layout="wide")
+
+def get_db_connection():
+    return psycopg2.connect(os.getenv("DATABASE_URL"))
+
+# ------------------------------------------------------------------
+# AGENT 1: THE AUDIO ENGINEER (Fixed: Google Gen AI SDK)
+# ------------------------------------------------------------------
+def generate_audio_chapter(text_content, voice_model="Puck"):
+    """
+    Converts chapter text to MP3 using Gemini 2.5 Flash Preview.
+    """
+    chunk_size = 2000
+    chunks = [text_content[i:i+chunk_size] for i in range(0, len(text_content), chunk_size)]
+    combined_audio = AudioSegment.empty()
+    crossfade_duration = 100
+    
+    # Gemini Native Audio Specs
+    SAMPLE_RATE = 24000
+    CHANNELS = 1
+    SAMPLE_WIDTH = 2 
+
+    # Show a spinner in the UI if called from main thread
+    with st.spinner(f"Generating Audio with voice: {voice_model}..."):
+        for index, chunk in enumerate(chunks):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash-preview", 
+                    contents=f"Read the following text clearly and naturally:\n\n{chunk}",
+                    config=types.GenerateContentConfig(
+                        response_modalities=["AUDIO"], 
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                    voice_name=voice_model
+                                )
+                            )
+                        )
+                    )
+                )
+                if response.candidates and response.candidates[0].content.parts:
+                    for part in response.candidates[0].content.parts:
+                        if part.inline_data:
+                            raw_audio_data = part.inline_data.data
+                            segment = AudioSegment(
+                                data=raw_audio_data,
+                                sample_width=SAMPLE_WIDTH,
+                                frame_rate=SAMPLE_RATE,
+                                channels=CHANNELS
+                            )
+                            if index == 0:
+                                combined_audio = segment
+                            else:
+                                combined_audio = combined_audio.append(segment, crossfade=crossfade_duration)
+            except Exception as e:
+                print(f"Error generating chunk {index}: {e}")
+
+    output_buffer = io.BytesIO()
+    combined_audio.export(output_buffer, format="mp3")
+    return output_buffer
+
+# ------------------------------------------------------------------
+# AGENT 2: THE WRITER (Fixed: Background Threading)
+# ------------------------------------------------------------------
+def update_chapter_status(chapter_id, status, content=None):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        if content:
+            cur.execute("UPDATE book_chapters SET status = %s, content = %s WHERE id = %s", (status, content, chapter_id))
+        else:
+            cur.execute("UPDATE book_chapters SET status = %s WHERE id = %s", (status, chapter_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"DB Error: {e}")
+
 def background_writer_task(chapter_id, chapter_title, topic_context):
     """
-    Executes the Writer Agent logic in a background thread.
-    This prevents the Streamlit UI from blocking/timing out.
+    Executes the Writer Agent in a background thread.
     """
     try:
-        # 1. Update DB Status -> 'Processing'
-        # (Assuming you have a function `update_chapter_status(id, status)`)
+        print(f"Starting background job for Chapter {chapter_id}")
         update_chapter_status(chapter_id, "Processing")
         
-        # 2. Research Phase (Exa.ai)
-        # Fetch sources for this specific chapter
-        sources = get_exa_research(f"{topic_context}: {chapter_title}")
+        # Simulating Research & Writing Loop (Replace with actual Exa/Gemini logic)
+        # For demonstration, we simply generate text.
+        full_narrative = f"# {chapter_title}\n\n"
         
-        # 3. Writing Phase (Gemini 2.5)
-        # Initialize the narrative
-        full_narrative = ""
+        scenes = ["The Beginning", "The Conflict", "The Resolution"]
         
-        # "Fractal Mode": Break chapter into 5 scenes to manage context
-        scenes = generate_scene_list(chapter_title) # Returns list of 5 sub-topics
-        
-        for i, scene in enumerate(scenes):
-            # Fetch last 5000 chars for context
-            prev_context = full_narrative[-5000:] if full_narrative else ""
+        for scene in scenes:
+            # Simulate writing time (researching...)
+            time.sleep(3) 
             
-            # Write the scene
-            scene_text = write_scene_with_gemini(scene, sources, prev_context)
-            full_narrative += f"\n\n## {scene}\n{scene_text}"
+            # Call Gemini to write the scene
+            prompt = f"Write a historical narrative scene about '{scene}' regarding '{chapter_title}' in the context of '{topic_context}'."
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-preview",
+                contents=prompt
+            )
+            scene_text = response.text if response.text else "[Error generating text]"
             
-            # CRITICAL: Save progress to DB after EACH scene.
-            # This allows the user to see the word count grow in real-time.
-            save_chapter_draft(chapter_id, full_narrative)
+            full_narrative += f"## {scene}\n{scene_text}\n\n"
+            
+            # SAVE PROGRESS
+            update_chapter_status(chapter_id, "Processing", full_narrative)
         
-        # 4. Finalize
-        update_chapter_status(chapter_id, "Completed")
-        print(f"Chapter {chapter_id} writing complete.")
+        update_chapter_status(chapter_id, "Completed", full_narrative)
+        print(f"Job for Chapter {chapter_id} finished.")
 
     except Exception as e:
-        print(f"Error in background writer: {e}")
+        print(f"Background Writer Error: {e}")
         update_chapter_status(chapter_id, "Error")
 
 # ------------------------------------------------------------------
-# FRONTEND UI: The "Write" Button
+# MAIN UI ARCHITECTURE
 # ------------------------------------------------------------------
-def render_writer_ui(chapter):
-    st.subheader(f"Chapter: {chapter['title']}")
+def main():
+    st.title("🏛️ The Newsroom")
+    st.caption("Automated AI Book Publishing Platform")
+
+    # Sidebar: Project Selection
+    st.sidebar.header("Library")
     
-    # Check current status from DB
-    # (Assuming `get_chapter_details` fetches the row from Supabase)
-    current_state = get_chapter_details(chapter['id'])
-    status = current_state.get('status', 'Draft')
-    content = current_state.get('content', '')
+    # Fetch projects
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, title FROM projects ORDER BY id DESC")
+    projects = cur.fetchall()
     
-    # 1. Button Logic
-    if status == "Draft" or status == "Error":
-        if st.button("Start AI Writer"):
-            # Spawn the thread!
-            t = threading.Thread(
-                target=background_writer_task, 
-                args=(chapter['id'], chapter['title'], st.session_state.get('book_topic'))
-            )
-            t.start()
-            
-            # Force a rerun to update the UI state immediately
+    # Project Creator
+    with st.sidebar.expander("New Book"):
+        new_topic = st.text_input("Topic")
+        if st.button("Draft Blueprint"):
+            cur.execute("INSERT INTO projects (title) VALUES (%s) RETURNING id", (new_topic,))
+            new_id = cur.fetchone()[0]
+            # (Here you would trigger the Architect Agent to generate TOC)
+            # For now, we insert a dummy chapter
+            cur.execute("INSERT INTO book_chapters (project_id, title, status) VALUES (%s, %s, 'Draft')", (new_id, "Chapter 1: The Spark"))
+            conn.commit()
             st.rerun()
 
-    # 2. Polling Logic (The "Keep-Alive" Fix)
-    elif status == "Processing":
-        st.info("AI Writer is active... (Do not close this tab)")
+    # Project Selector
+    if projects:
+        project_options = {p[1]: p[0] for p in projects}
+        selected_title = st.sidebar.selectbox("Select Project", list(project_options.keys()))
+        selected_id = project_options[selected_title]
+        st.session_state['book_topic'] = selected_title # Context for writer
         
-        # Show live progress
-        word_count = len(content.split())
-        st.metric(label="Words Written", value=word_count)
+        st.sidebar.markdown("---")
         
-        # Animated progress bar
-        st.progress(60) # Indeterminate or calculated based on scene count
+        # Fetch Chapters for selected project
+        cur.execute("SELECT id, title, status, content FROM book_chapters WHERE project_id = %s ORDER BY id", (selected_id,))
+        chapters = cur.fetchall()
         
-        # Wait 5 seconds and refresh. 
-        # This keeps the websocket active and prevents Nginx timeout.
-        time.sleep(5) 
-        st.rerun()
+        # Display Chapters
+        for ch_id, ch_title, ch_status, ch_content in chapters:
+            with st.expander(f"{ch_title} [{ch_status}]", expanded=True):
+                
+                # STATUS: DRAFT or ERROR
+                if ch_status in ["Draft", "Error"]:
+                    if st.button(f"Write '{ch_title}'", key=f"write_{ch_id}"):
+                        # SPAWN BACKGROUND THREAD
+                        t = threading.Thread(
+                            target=background_writer_task, 
+                            args=(ch_id, ch_title, st.session_state.get('book_topic'))
+                        )
+                        t.start()
+                        st.rerun()
 
-    # 3. Completion State
-    elif status == "Completed":
-        st.success("Chapter Complete!")
-        st.markdown(content)
-        
-        # Option to regenerate audio (using the fixed Audio code)
-        if st.button("Generate Audio"):
-            # ... call audio generation ...
-            pass
+                # STATUS: PROCESSING (The Polling Fix)
+                elif ch_status == "Processing":
+                    st.info("AI Writer is active... (Do not close this tab)")
+                    if ch_content:
+                        word_count = len(ch_content.split())
+                        st.metric("Words Written", word_count)
+                    st.progress(60) 
+                    time.sleep(3) # Polling interval
+                    st.rerun() # Refresh to check DB
+                
+                # STATUS: COMPLETED
+                elif ch_status == "Completed":
+                    st.success("Chapter Written")
+                    st.download_button("Download Text", ch_content, file_name=f"{ch_title}.md")
+                    
+                    # Audio Generation
+                    if st.button(f"Produce Audio", key=f"audio_{ch_id}"):
+                        audio_data = generate_audio_chapter(ch_content)
+                        st.audio(audio_data, format='audio/mp3')
+                        st.download_button("Download MP3", audio_data, file_name=f"{ch_title}.mp3")
+
+    cur.close()
+    conn.close()
+
+if __name__ == "__main__":
+    main()
