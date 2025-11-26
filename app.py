@@ -11,11 +11,19 @@ import io
 import requests
 
 # Load Environment Variables
-load_dotenv()
+# Force load from the absolute path to ensure Systemd finds it
+env_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(env_path)
+
+api_key = os.getenv("GEMINI_API_KEY")
+
+# Safety Check: Stop the app immediately if the key is missing
+if not api_key:
+    raise ValueError(f"CRITICAL ERROR: GEMINI_API_KEY not found in {env_path}. Please check your .env file.")
 
 # Initialize Gemini Client (v1 SDK)
-# Ensure GEMINI_API_KEY is set in your .env file
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+client = genai.Client(api_key=api_key)
+
 
 # ------------------------------------------------------------------
 # DATABASE & SETUP
