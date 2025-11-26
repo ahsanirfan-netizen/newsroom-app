@@ -25,7 +25,6 @@ load_dotenv(env_path)
 gemini_key = os.getenv("GEMINI_API_KEY")
 exa_key = os.getenv("EXA_API_KEY")
 
-# Validate Keys (Safe to use st.error now)
 if not gemini_key:
     st.error("CRITICAL: GEMINI_API_KEY missing from .env")
     st.stop()
@@ -33,7 +32,6 @@ if not exa_key:
     st.error("CRITICAL: EXA_API_KEY missing from .env")
     st.stop()
 
-# Initialize Clients
 try:
     client = genai.Client(api_key=gemini_key)
     exa = Exa(api_key=exa_key)
@@ -52,7 +50,6 @@ def run_schema_check():
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Base Tables
         cur.execute("""
             CREATE TABLE IF NOT EXISTS books (
                 id SERIAL PRIMARY KEY,
@@ -104,7 +101,6 @@ def run_schema_check():
     except Exception as e:
         st.error(f"Schema Check Error: {e}")
 
-# Run checks
 run_schema_check()
 
 # ------------------------------------------------------------------
@@ -123,7 +119,6 @@ def generate_blueprint(topic, briefing):
         if search_response and search_response.results:
             for i, result in enumerate(search_response.results):
                 content_snippet = result.text[:2000] if result.text else "No text."
-                # Sanitize
                 content_snippet = content_snippet.replace("{", "(").replace("}", ")")
                 dossier += f"\n--- SOURCE {i+1} ---\nTitle: {result.title}\nContent: {content_snippet}\n"
 
@@ -198,7 +193,6 @@ def generate_audio_chapter(text_content, voice_model="Puck"):
 # ------------------------------------------------------------------
 def run_cartographer_task(chapter_id, book_id, content):
     try:
-        # Prompt Gemini for structured data extraction
         prompt = "Analyze this text. Extract structured data.\nTEXT: " + content[:30000] + """
         
         OUTPUT JSON keys:
@@ -215,7 +209,6 @@ def run_cartographer_task(chapter_id, book_id, content):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # Insert Characters
         chars_count = 0
         for char in data.get("characters", []):
             cur.execute("""
@@ -224,7 +217,6 @@ def run_cartographer_task(chapter_id, book_id, content):
             """, (char.get('name'), char.get('role'), char.get('description'), book_id))
             chars_count += 1
 
-        # Insert Timeline Events
         events_count = 0
         for event in data.get("timeline", []):
             cur.execute("""
@@ -268,10 +260,8 @@ def update_chapter_status(chapter_id, status, content=None):
 
 def background_writer_task(chapter_id, chapter_topic, book_context):
     try:
-        # Mark as processing
         update_chapter_status(chapter_id, "Processing")
         
-        # 1. FETCH DATA FROM DB
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -291,10 +281,8 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
         cur.close()
         conn.close()
 
-        # 2. DEEP RESEARCH (EXA)
         full_source_text = ""
         try:
-            # Safe strings for query
             safe_topic = chapter_topic.replace("{", "").replace("}", "")
             safe_summary = chapter_summary.replace("{", "").replace("}", "")
             exa_query = f"{safe_topic}: {safe_summary}"
@@ -302,19 +290,15 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
             search_response = exa.search_and_contents(exa_query, num_results=10, text=True)
             for i, res in enumerate(search_response.results):
                 text_content = res.text[:15000] if res.text else ""
-                # CRITICAL FIX: Escape braces to prevent F-string crash
                 text_content = text_content.replace("{", "(").replace("}", ")")
                 full_source_text += f"\n[SOURCE {i+1}]: {res.title}\n{text_content}\n"
         except Exception as e:
             print(f"Exa Research Error: {e}")
             full_source_text = "Internal knowledge only."
 
-        # 3. BUILD MASTER CONTEXT
-        # Use safe concatenation
         MASTER_CONTEXT = f"BOOK: {book_context}\nCHAPTER: {chapter_topic}\nSUMMARY: {chapter_summary}\n\nCHARACTERS:\n{char_context}\n\nTIMELINE:\n{timeline_context}\n\nRESEARCH:\n"
         MASTER_CONTEXT += full_source_text[:200000] 
 
-        # 4. SUB-TOPIC PLANNING
         plan_prompt = f"""
         You are the Architect. Based on the MASTER CONTEXT provided below, outline the subtopics (scenes) for this chapter.
         
@@ -337,14 +321,12 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
         except Exception:
             subtopics = ["Introduction", "Main Conflict", "Resolution"]
 
-        # 5. RECURSIVE WRITING LOOP
         full_narrative = f"# {chapter_topic}\n\n"
         previous_summary = "The chapter begins."
         
         for subtopic in subtopics:
             time.sleep(2) 
             
-            # Use safe concatenation for prompt to avoid F-string limits
             write_prompt = f"""
             Write a section of a history book.
             CURRENT SUBTOPIC: {subtopic}
@@ -391,7 +373,6 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
 # MAIN UI
 # ------------------------------------------------------------------
 def main():
-    # Sidebar
     st.sidebar.header("Library")
     if 'selected_book_id' not in st.session_state:
         st.session_state['selected_book_id'] = None
@@ -459,7 +440,6 @@ def main():
     else:
         st.sidebar.info("No books yet.")
 
-    # Main Content
     if st.session_state['selected_book_id']:
         st.header(f"📖 {st.session_state['selected_book_title']}")
         
@@ -479,7 +459,6 @@ def main():
                     st.info("AI Writer is active... (This may take a few minutes)")
                     st.progress(60)
                     if ch_content:
-                        # Count words to show progress
                         word_count = len(ch_content.split())
                         st.caption(f"Drafting... {word_count} words written so far.")
                     time.sleep(5) 
@@ -493,5 +472,15 @@ def main():
                 b_col1, b_col2, b_col3, b_col4 = st.columns(4)
 
                 with b_col1:
-                    # Map Button (Draft Phase)
-      
+                    if ch_status == "Draft":
+                        if st.button("🗺️ Map Plan", key=f"map_{ch_id}"):
+                            with st.spinner("Cartographer is mapping the outline..."):
+                                n_c, n_e = run_cartographer_task(ch_id, st.session_state['selected_book_id'], ch_content)
+                                st.success(f"Mapped: {n_c} Chars, {n_e} Events")
+                
+                with b_col2:
+                    if ch_status in ["Draft", "Error"]:
+                        if st.button("✍️ Write Chapter", key=f"write_{ch_id}"):
+                            t = threading.Thread(target=background_writer_task, args=(ch_id, ch_topic, st.session_state['selected_book_title']))
+                            t.start()
+                    
