@@ -11,6 +11,7 @@ from openai import OpenAI
 from linkup import LinkupClient
 from dotenv import load_dotenv
 from fpdf import FPDF
+from gtts import gTTS
 from pydub import AudioSegment
 from pydub.effects import normalize
 from pydub.utils import which
@@ -128,10 +129,11 @@ def create_pdf(book_title, chapters):
     return bytes(pdf.output()) 
 
 # ==============================================================================
-# 🎧 AUDIO ENGINEERING ENGINE (GEMINI API)
+# 🎧 AUDIO ENGINEERING ENGINE (ROBUST)
 # ==============================================================================
 def chunk_text(text, max_chars=2000):
-    """Splits text into chunks to stay within API limits."""
+    """Splits text into chunks, respecting sentence boundaries."""
+    if not text: return []
     chunks = []
     current_chunk = ""
     sentences = text.split('. ')
@@ -139,82 +141,76 @@ def chunk_text(text, max_chars=2000):
         if len(current_chunk) + len(sentence) < max_chars:
             current_chunk += sentence + ". "
         else:
-            chunks.append(current_chunk)
+            if current_chunk: chunks.append(current_chunk)
             current_chunk = sentence + ". "
     if current_chunk:
         chunks.append(current_chunk)
     return chunks
 
-def generate_gemini_audio(text, voice_name="Puck"):
-    """
-    Calls Google's Generative Language API directly for TTS.
-    This bypasses SDK issues and gets the newest models.
-    """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={GEMINI_KEY}"
-    
-    headers = {"Content-Type": "application/json"}
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": text}]
-        }],
-        "generationConfig": {
-            "response_modalities": ["AUDIO"],
-            "speech_config": {
-                "voice_config": {
-                    "prebuilt_voice_config": {
-                        "voice_name": voice_name
-                    }
-                }
-            }
-        }
-    }
-    
-    response = requests.post(url, headers=headers, json=payload)
-    
-    if response.status_code != 200:
-        raise Exception(f"Gemini API Error {response.status_code}: {response.text}")
-        
-    result = response.json()
-    # The audio comes back as base64 encoded string
-    try:
-        audio_b64 = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-        return base64.b64decode(audio_b64)
-    except KeyError:
-        raise Exception("No audio data found in response")
-
 def produce_audiobook(text, voice_name):
     """
-    Chunks text, calls Gemini TTS, stitches with crossfade in memory.
+    Uses gTTS with robust error handling.
     """
     chunks = chunk_text(text)
+    if not chunks:
+        st.warning("No text to speak.")
+        return None
+
     combined_audio = AudioSegment.empty()
+    temp_files = []
     
     try:
         for i, chunk in enumerate(chunks):
-            # 1. Get Raw Audio Bytes from Gemini
-            raw_audio_bytes = generate_gemini_audio(chunk, voice_name)
+            # Map Voice Names to Google TLDs for accents
+            tld_map = {
+                "US English": "us", "British English": "co.uk", 
+                "Australian English": "com.au", "Indian English": "co.in", 
+                "South African": "co.za"
+            }
+            tld = tld_map.get(voice_name, "us")
             
-            # 2. Load into Pydub (Memory Only - No Temp Files)
-            segment = AudioSegment.from_file(io.BytesIO(raw_audio_bytes), format="wav") # Gemini returns WAV/PCM usually
+            # Generate
+            # We use a simple try/except loop so one bad chunk doesn't kill the book
+            try:
+                tts = gTTS(text=chunk, lang='en', tld=tld, slow=False)
+                filename = f"temp_chunk_{i}.mp3"
+                tts.save(filename)
+                temp_files.append(filename)
+            except Exception as e:
+                print(f"Chunk {i} failed: {e}")
+                continue
+
+        # Stitch
+        for f in temp_files:
+            if os.path.exists(f):
+                try:
+                    segment = AudioSegment.from_mp3(f)
+                    if len(combined_audio) == 0:
+                        combined_audio = segment # Initialize with first segment
+                    else:
+                        combined_audio = combined_audio.append(segment, crossfade=100)
+                except Exception as e:
+                    print(f"Stitching failed for {f}: {e}")
+        
+        if len(combined_audio) > 0:
+            final_audio = normalize(combined_audio)
+            buffer = io.BytesIO()
+            final_audio.export(buffer, format="mp3")
+            buffer.seek(0)
             
-            # 3. Stitch
-            if i == 0:
-                combined_audio += segment
-            else:
-                combined_audio = combined_audio.append(segment, crossfade=100) 
-        
-        # 4. Normalize
-        final_audio = normalize(combined_audio)
-        
-        # 5. Export
-        buffer = io.BytesIO()
-        final_audio.export(buffer, format="mp3")
-        buffer.seek(0)
-        return buffer
-        
+            # Cleanup
+            for f in temp_files:
+                if os.path.exists(f): os.remove(f)
+                
+            return buffer
+        else:
+            st.error("Audio generation resulted in empty file.")
+            return None
+            
     except Exception as e:
-        st.error(f"Audio Engine Failure: {e}")
+        st.error(f"Audio Engine Critical Failure: {e}")
+        for f in temp_files:
+             if os.path.exists(f): os.remove(f)
         return None
 
 # ==============================================================================
@@ -268,15 +264,13 @@ if selected_book:
                 st.subheader("🎧 Audiobook Generator")
                 col_audio_1, col_audio_2 = st.columns([3, 2])
                 with col_audio_1:
-                    # Gemini 2.5 Voices
-                    voice_options = ["Puck", "Charon", "Kore", "Fenrir", "Aoede"]
-                    selected_voice = st.selectbox("Narrator Voice", voice_options, key=f"v_{ch['id']}")
+                    voice_options = ["US English", "British English", "Australian English", "Indian English", "South African"]
+                    selected_voice = st.selectbox("Narrator Accent", voice_options, key=f"v_{ch['id']}")
                 with col_audio_2:
                     st.write("") 
                     if st.button("🎙️ Produce Audio", key=f"tts_{ch['id']}"):
-                        with st.spinner(f"Generating with Voice: {selected_voice}..."):
+                        with st.spinner("Chunking, Stitching & Mastering..."):
                             if ch['content']:
-                                # Limit to first 10k chars for stability during demo
                                 audio_buffer = produce_audiobook(ch['content'][:10000], selected_voice) 
                                 if audio_buffer:
                                     st.success("Mastering Complete.")
