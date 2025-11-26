@@ -12,372 +12,219 @@ from pydub import AudioSegment
 import io
 
 # ------------------------------------------------------------------
-# 1. STREAMLIT CONFIG (MUST BE FIRST)
+# 1. INITIALIZATION
 # ------------------------------------------------------------------
 st.set_page_config(page_title="The Newsroom", page_icon="🏛️", layout="wide")
 
-# ------------------------------------------------------------------
-# 2. CONFIG & KEYS
-# ------------------------------------------------------------------
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
 
 gemini_key = os.getenv("GEMINI_API_KEY")
 exa_key = os.getenv("EXA_API_KEY")
 
-if not gemini_key:
-    st.error("CRITICAL: GEMINI_API_KEY missing from .env")
-    st.stop()
-if not exa_key:
-    st.error("CRITICAL: EXA_API_KEY missing from .env")
+if not gemini_key or not exa_key:
+    st.error("CRITICAL: API Keys missing from .env file.")
     st.stop()
 
 try:
     client = genai.Client(api_key=gemini_key)
     exa = Exa(api_key=exa_key)
 except Exception as e:
-    st.error(f"Failed to initialize AI clients: {e}")
+    st.error(f"Client Init Error: {e}")
     st.stop()
 
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"))
 
 # ------------------------------------------------------------------
-# 3. SELF-HEALING SCHEMA
+# 2. SCHEMA CHECK
 # ------------------------------------------------------------------
 def run_schema_check():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS books (
-                id SERIAL PRIMARY KEY,
-                title TEXT NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS book_chapters (
-                id SERIAL PRIMARY KEY,
-                book_id INTEGER REFERENCES books(id) ON DELETE CASCADE,
-                topic TEXT NOT NULL,
-                status TEXT DEFAULT 'Draft',
-                content TEXT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS characters (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                role TEXT,
-                description TEXT,
-                book_id INTEGER REFERENCES books(id) ON DELETE CASCADE
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS timeline (
-                id SERIAL PRIMARY KEY,
-                character_name TEXT,
-                location TEXT,
-                start_date DATE,
-                end_date DATE,
-                book_id INTEGER REFERENCES books(id) ON DELETE CASCADE,
-                chapter_id INTEGER
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS table_of_contents (
-                id SERIAL PRIMARY KEY,
-                content JSONB,
-                book_id INTEGER UNIQUE REFERENCES books(id) ON DELETE CASCADE
-            );
-        """)
-
+        # Create Tables if they don't exist
+        cur.execute("CREATE TABLE IF NOT EXISTS books (id SERIAL PRIMARY KEY, title TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());")
+        cur.execute("CREATE TABLE IF NOT EXISTS book_chapters (id SERIAL PRIMARY KEY, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE, topic TEXT NOT NULL, status TEXT DEFAULT 'Draft', content TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());")
+        cur.execute("CREATE TABLE IF NOT EXISTS characters (id SERIAL PRIMARY KEY, name TEXT NOT NULL, role TEXT, description TEXT, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE);")
+        cur.execute("CREATE TABLE IF NOT EXISTS timeline (id SERIAL PRIMARY KEY, character_name TEXT, location TEXT, start_date DATE, end_date DATE, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE, chapter_id INTEGER);")
+        cur.execute("CREATE TABLE IF NOT EXISTS table_of_contents (id SERIAL PRIMARY KEY, content JSONB, book_id INTEGER UNIQUE REFERENCES books(id) ON DELETE CASCADE);")
         conn.commit()
         cur.close()
         conn.close()
     except Exception as e:
-        st.error(f"Schema Check Error: {e}")
+        st.error(f"Schema Error: {e}")
 
 run_schema_check()
 
 # ------------------------------------------------------------------
-# AGENT 0: THE ARCHITECT (Blueprinting)
+# 3. AGENTS
 # ------------------------------------------------------------------
 def generate_blueprint(topic, briefing):
-    with st.spinner("🕵️ The Architect is researching via Exa..."):
+    with st.spinner("Architect researching..."):
         query = f"{topic}: {briefing}"
         try:
-            search_response = exa.search_and_contents(query, num_results=10, text=True)
-        except Exception as e:
-            st.error(f"Exa Error: {e}")
+            search = exa.search_and_contents(query, num_results=10, text=True)
+        except:
             return []
-
-        dossier = ""
-        if search_response and search_response.results:
-            for i, result in enumerate(search_response.results):
-                content_snippet = result.text[:2000] if result.text else "No text."
-                content_snippet = content_snippet.replace("{", "(").replace("}", ")")
-                dossier += f"\n--- SOURCE {i+1} ---\nTitle: {result.title}\nContent: {content_snippet}\n"
-
-    with st.spinner("🏗️ The Architect is drafting the Table of Contents..."):
-        prompt = f"""
-        You are the Chief Editor of a non-fiction publishing house.
-        Task: Create a Table of Contents for a book.
-        Topic: {topic}
-        Brief: {briefing}
-        Research: {dossier}
         
-        OUTPUT FORMAT:
-        Return a JSON list of objects with keys: "topic", "content" (content is a detailed outline).
-        Generate 5-10 chapters.
-        """
+        dossier = ""
+        for r in search.results:
+            txt = r.text[:2000].replace("{", "(").replace("}", ")") if r.text else ""
+            dossier += f"\nTitle: {r.title}\nText: {txt}\n"
+
+    with st.spinner("Architect drafting..."):
+        prompt = f"Create a book TOC (JSON list of objects with keys 'topic', 'content').\nTopic: {topic}\nBrief: {briefing}\nContext: {dossier}"
         try:
-            response = client.models.generate_content(
-                model="gemini-2.0-flash-exp", 
+            res = client.models.generate_content(
+                model="gemini-2.0-flash-exp",
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
-            data = json.loads(response.text)
-            if isinstance(data, list): return data
-            elif isinstance(data, dict): return data.get("chapters", list(data.values())[0])
-            return []
-        except Exception as e:
-            st.error(f"Gemini Blueprint Error: {e}")
+            data = json.loads(res.text)
+            if isinstance(data, dict): return data.get("chapters", list(data.values())[0])
+            return data
+        except:
             return []
 
-# ------------------------------------------------------------------
-# AGENT 1: THE AUDIO ENGINEER
-# ------------------------------------------------------------------
-def generate_audio_chapter(text_content, voice_model="Puck"):
+def generate_audio_chapter(text, voice="Puck"):
     chunk_size = 2000
-    chunks = [text_content[i:i+chunk_size] for i in range(0, len(text_content), chunk_size)]
-    combined_audio = AudioSegment.empty()
-    crossfade_duration = 100
+    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+    audio = AudioSegment.empty()
     
-    with st.spinner(f"Generating Audio ({voice_model})..."):
-        for index, chunk in enumerate(chunks):
+    with st.spinner("Generating Audio..."):
+        for i, chunk in enumerate(chunks):
             try:
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash-exp", 
-                    contents=f"Read this naturally:\n\n{chunk}",
+                res = client.models.generate_content(
+                    model="gemini-2.0-flash-exp",
+                    contents=f"Read naturally:\n{chunk}",
                     config=types.GenerateContentConfig(
-                        response_modalities=["AUDIO"], 
+                        response_modalities=["AUDIO"],
                         speech_config=types.SpeechConfig(
                             voice_config=types.VoiceConfig(
-                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_model)
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
                             )
                         )
                     )
                 )
-                if response.candidates and response.candidates[0].content.parts:
-                    for part in response.candidates[0].content.parts:
-                        if part.inline_data:
-                            segment = AudioSegment(
-                                data=part.inline_data.data,
-                                sample_width=2, frame_rate=24000, channels=1
-                            )
-                            if index == 0: combined_audio = segment
-                            else: combined_audio = combined_audio.append(segment, crossfade=crossfade_duration)
-            except Exception as e:
-                print(f"Audio Error: {e}")
+                if res.candidates[0].content.parts[0].inline_data:
+                    seg = AudioSegment(data=res.candidates[0].content.parts[0].inline_data.data, sample_width=2, frame_rate=24000, channels=1)
+                    if i == 0: audio = seg
+                    else: audio = audio.append(seg, crossfade=100)
+            except: pass
+            
+    buf = io.BytesIO()
+    audio.export(buf, format="mp3")
+    return buf
 
-    output_buffer = io.BytesIO()
-    combined_audio.export(output_buffer, format="mp3")
-    return output_buffer
-
-# ------------------------------------------------------------------
-# AGENT 3: THE CARTOGRAPHER (Mapping)
-# ------------------------------------------------------------------
 def run_cartographer_task(chapter_id, book_id, content):
     try:
-        prompt = "Analyze this text. Extract structured data.\nTEXT: " + content[:30000] + """
-        
-        OUTPUT JSON keys:
-        1. "characters": list of {"name": "...", "role": "...", "description": "..."}
-        2. "timeline": list of {"character_name": "...", "location": "...", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}
-        """
-        response = client.models.generate_content(
+        prompt = "Extract JSON: {'characters': [{'name','role','description'}], 'timeline': [{'character_name','location','start_date','end_date'}]}.\nTEXT: " + content[:30000]
+        res = client.models.generate_content(
             model="gemini-2.0-flash-exp",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
-        data = json.loads(response.text)
+        data = json.loads(res.text)
         
         conn = get_db_connection()
         cur = conn.cursor()
-
-        chars_count = 0
-        for char in data.get("characters", []):
-            cur.execute("""
-                INSERT INTO characters (name, role, description, book_id)
-                VALUES (%s, %s, %s, %s)
-            """, (char.get('name'), char.get('role'), char.get('description'), book_id))
-            chars_count += 1
-
-        events_count = 0
-        for event in data.get("timeline", []):
-            cur.execute("""
-                INSERT INTO timeline (character_name, location, start_date, end_date, book_id, chapter_id)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (
-                event.get('character_name'), 
-                event.get('location'), 
-                event.get('start_date'), 
-                event.get('end_date'), 
-                book_id, 
-                chapter_id
-            ))
-            events_count += 1
-
+        
+        c_count = 0
+        for c in data.get("characters", []):
+            cur.execute("INSERT INTO characters (name, role, description, book_id) VALUES (%s, %s, %s, %s)", (c.get('name'), c.get('role'), c.get('description'), book_id))
+            c_count += 1
+            
+        e_count = 0
+        for e in data.get("timeline", []):
+            cur.execute("INSERT INTO timeline (character_name, location, start_date, end_date, book_id, chapter_id) VALUES (%s, %s, %s, %s, %s, %s)", (e.get('character_name'), e.get('location'), e.get('start_date'), e.get('end_date'), book_id, chapter_id))
+            e_count += 1
+            
         conn.commit()
         cur.close()
         conn.close()
-        return chars_count, events_count
-
+        return c_count, e_count
     except Exception as e:
-        print(f"Cartographer Error: {e}")
+        print(e)
         return 0, 0
 
-# ------------------------------------------------------------------
-# AGENT 2: THE WRITER (RECURSIVE LOOP)
-# ------------------------------------------------------------------
-def update_chapter_status(chapter_id, status, content=None):
+def update_status(cid, status, text=None):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        if content:
-            cur.execute("UPDATE book_chapters SET status = %s, content = %s WHERE id = %s", (status, content, chapter_id))
-        else:
-            cur.execute("UPDATE book_chapters SET status = %s WHERE id = %s", (status, chapter_id))
+        if text: cur.execute("UPDATE book_chapters SET status=%s, content=%s WHERE id=%s", (status, text, cid))
+        else: cur.execute("UPDATE book_chapters SET status=%s WHERE id=%s", (status, cid))
         conn.commit()
         cur.close()
         conn.close()
-    except Exception as e:
-        print(f"DB Error: {e}")
+    except: pass
 
-def background_writer_task(chapter_id, chapter_topic, book_context):
+def background_writer_task(chapter_id, topic, book_title):
     try:
-        update_chapter_status(chapter_id, "Processing")
-        
+        update_status(chapter_id, "Processing")
         conn = get_db_connection()
         cur = conn.cursor()
         
-        cur.execute("SELECT book_id, content FROM book_chapters WHERE id = %s", (chapter_id,))
-        result = cur.fetchone()
-        book_id = result[0]
-        chapter_summary = result[1] 
+        cur.execute("SELECT book_id, content FROM book_chapters WHERE id=%s", (chapter_id,))
+        res = cur.fetchone()
+        bid, summary = res[0], res[1]
         
-        cur.execute("SELECT name, role, description FROM characters WHERE book_id = %s", (book_id,))
-        db_chars = cur.fetchall()
-        char_context = "\n".join([f"- {c[0]} ({c[1]}): {c[2]}" for c in db_chars])
+        cur.execute("SELECT name, role, description FROM characters WHERE book_id=%s", (bid,))
+        chars = "\n".join([f"- {c[0]} ({c[1]}): {c[2]}" for c in cur.fetchall()])
         
-        cur.execute("SELECT start_date, location, character_name FROM timeline WHERE chapter_id = %s ORDER BY start_date", (chapter_id,))
-        db_events = cur.fetchall()
-        timeline_context = "\n".join([f"- {e[0]}: {e[2]} in {e[1]}" for e in db_events])
-        
+        cur.execute("SELECT start_date, location, character_name FROM timeline WHERE chapter_id=%s ORDER BY start_date", (chapter_id,))
+        events = "\n".join([f"- {e[0]}: {e[2]} in {e[1]}" for e in cur.fetchall()])
         cur.close()
         conn.close()
 
-        full_source_text = ""
+        # Research
+        full_research = ""
         try:
-            safe_topic = chapter_topic.replace("{", "").replace("}", "")
-            safe_summary = chapter_summary.replace("{", "").replace("}", "")
-            exa_query = f"{safe_topic}: {safe_summary}"
-            
-            search_response = exa.search_and_contents(exa_query, num_results=10, text=True)
-            for i, res in enumerate(search_response.results):
-                text_content = res.text[:15000] if res.text else ""
-                text_content = text_content.replace("{", "(").replace("}", ")")
-                full_source_text += f"\n[SOURCE {i+1}]: {res.title}\n{text_content}\n"
-        except Exception as e:
-            print(f"Exa Research Error: {e}")
-            full_source_text = "Internal knowledge only."
+            safe_q = f"{topic}: {summary}".replace("{","").replace("}","")
+            search = exa.search_and_contents(safe_q, num_results=10, text=True)
+            for i, r in enumerate(search.results):
+                txt = r.text[:10000].replace("{", "(").replace("}", ")") if r.text else ""
+                full_research += f"\nSOURCE {i+1}: {r.title}\n{txt}\n"
+        except: full_research = "No Exa results."
 
-        MASTER_CONTEXT = f"BOOK: {book_context}\nCHAPTER: {chapter_topic}\nSUMMARY: {chapter_summary}\n\nCHARACTERS:\n{char_context}\n\nTIMELINE:\n{timeline_context}\n\nRESEARCH:\n"
-        MASTER_CONTEXT += full_source_text[:200000] 
+        # Master Context
+        MASTER = f"BOOK: {book_title}\nCHAPTER: {topic}\nSUMMARY: {summary}\nCHARS: {chars}\nEVENTS: {events}\nRESEARCH: {full_research[:200000]}"
 
-        plan_prompt = f"""
-        You are the Architect. Based on the MASTER CONTEXT provided below, outline the subtopics (scenes) for this chapter.
-        
-        MASTER CONTEXT (Truncated for planning):
-        {MASTER_CONTEXT[:50000]}
-        
-        OUTPUT: Return a JSON list of strings, where each string is a subtopic title.
-        Example: ["The Arrival", "The Debate", "The Decision"]
-        """
-        
-        subtopics = []
+        # Planning
+        plan_prompt = f"Outline subtopics (JSON list of strings).\nCONTEXT: {MASTER[:50000]}"
         try:
-            plan_res = client.models.generate_content(
-                model="gemini-2.0-flash-exp",
-                contents=plan_prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
+            plan_res = client.models.generate_content(model="gemini-2.0-flash-exp", contents=plan_prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
             subtopics = json.loads(plan_res.text)
-            if isinstance(subtopics, dict): subtopics = subtopics.get("subtopics", list(subtopics.values())[0])
-        except Exception:
-            subtopics = ["Introduction", "Main Conflict", "Resolution"]
+            if isinstance(subtopics, dict): subtopics = list(subtopics.values())[0]
+        except: subtopics = ["Part 1", "Part 2", "Part 3"]
 
-        full_narrative = f"# {chapter_topic}\n\n"
-        previous_summary = "The chapter begins."
+        # Writing Loop
+        narrative = f"# {topic}\n\n"
+        prev_sum = "Start."
         
-        for subtopic in subtopics:
-            time.sleep(2) 
-            
-            write_prompt = f"""
-            Write a section of a history book.
-            CURRENT SUBTOPIC: {subtopic}
-            PREVIOUS SECTION SUMMARY: {previous_summary}
-            
-            INSTRUCTIONS:
-            1. Write 500-1000 words of factual narrative.
-            2. Use the Research Sources provided below.
-            3. Generate a summary for the next section.
-            
-            OUTPUT JSON: {{ "text": "...", "summary": "..." }}
-            
-            MASTER CONTEXT:
-            """
-            write_prompt += MASTER_CONTEXT[:100000]
-            
+        for sub in subtopics:
+            time.sleep(2)
+            wp = f"Write 500 words. JSON: {{'text': '...', 'summary': '...'}}\nSubtopic: {sub}\nPrev: {prev_sum}\nContext: {MASTER[:100000]}"
             try:
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash-exp",
-                    contents=write_prompt,
-                    config=types.GenerateContentConfig(response_mime_type="application/json")
-                )
-                
-                data = json.loads(response.text)
-                new_text = data.get("text", "")
-                new_summary = data.get("summary", "")
-                
-                full_narrative += f"## {subtopic}\n{new_text}\n\n"
-                previous_summary = new_summary 
-                
-                update_chapter_status(chapter_id, "Processing", full_narrative)
-                
-            except Exception as e:
-                print(f"Error writing subtopic {subtopic}: {e}")
-                full_narrative += f"\n\n[Section Error: {subtopic}]\n\n"
-        
-        update_chapter_status(chapter_id, "Completed", full_narrative)
-
-    except Exception as e:
-        print(f"Writer Critical Error: {e}")
-        update_chapter_status(chapter_id, "Error")
+                w_res = client.models.generate_content(model="gemini-2.0-flash-exp", contents=wp, config=types.GenerateContentConfig(response_mime_type="application/json"))
+                wd = json.loads(w_res.text)
+                narrative += f"## {sub}\n{wd.get('text','')}\n\n"
+                prev_sum = wd.get('summary','')
+                update_status(chapter_id, "Processing", narrative)
+            except: pass
+            
+        update_status(chapter_id, "Completed", narrative)
+    except:
+        update_status(chapter_id, "Error")
 
 # ------------------------------------------------------------------
-# MAIN UI
+# 4. UI MAIN LOOP
 # ------------------------------------------------------------------
 def main():
+    # Sidebar
     st.sidebar.header("Library")
-    if 'selected_book_id' not in st.session_state:
-        st.session_state['selected_book_id'] = None
-    if 'selected_book_title' not in st.session_state:
-        st.session_state['selected_book_title'] = ""
+    if 'sel_bid' not in st.session_state: st.session_state['sel_bid'] = None
+    if 'sel_title' not in st.session_state: st.session_state['sel_title'] = ""
 
     conn = get_db_connection()
     cur = conn.cursor()
@@ -385,102 +232,91 @@ def main():
     try:
         cur.execute("SELECT id, title FROM books ORDER BY id DESC")
         books = cur.fetchall()
-    except Exception:
-        books = []
+    except: books = []
 
-    with st.sidebar.expander("New Book", expanded=False):
-        new_topic = st.text_input("Topic", placeholder="e.g. The Silk Road")
-        mission_brief = st.text_area("Brief", placeholder="Focus on trade economics...")
-        
+    with st.sidebar.expander("New Book"):
+        new_t = st.text_input("Topic")
+        new_b = st.text_area("Brief")
         if st.button("Draft Blueprint"):
-            if new_topic and mission_brief:
-                cur.execute("INSERT INTO books (title) VALUES (%s) RETURNING id", (new_topic,))
-                new_book_id = cur.fetchone()[0]
-                
-                generated_data = generate_blueprint(new_topic, mission_brief)
-                toc_json = json.dumps(generated_data)
-                cur.execute("INSERT INTO table_of_contents (book_id, content) VALUES (%s, %s)", (new_book_id, toc_json))
-
-                for chapter in generated_data:
-                    cur.execute(
-                        "INSERT INTO book_chapters (book_id, topic, status, content) VALUES (%s, %s, 'Draft', %s)", 
-                        (new_book_id, chapter.get('topic'), chapter.get('content'))
-                    )
+            if new_t and new_b:
+                cur.execute("INSERT INTO books (title) VALUES (%s) RETURNING id", (new_t,))
+                bid = cur.fetchone()[0]
+                data = generate_blueprint(new_t, new_b)
+                cur.execute("INSERT INTO table_of_contents (book_id, content) VALUES (%s, %s)", (bid, json.dumps(data)))
+                for c in data:
+                    cur.execute("INSERT INTO book_chapters (book_id, topic, status, content) VALUES (%s, %s, 'Draft', %s)", (bid, c.get('topic'), c.get('content')))
                 conn.commit()
-                st.session_state['selected_book_id'] = new_book_id
-                st.session_state['selected_book_title'] = new_topic
-                st.success(f"Blueprint Created: {len(generated_data)} Chapters")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.warning("Topic and Brief required.")
-
-    st.sidebar.markdown("---")
-
-    if books:
-        for book_id, book_title in books:
-            col1, col2 = st.sidebar.columns([4, 1])
-            label = f"📂 {book_title}" if st.session_state['selected_book_id'] == book_id else f"📄 {book_title}"
-            
-            if col1.button(label, key=f"open_book_{book_id}"):
-                st.session_state['selected_book_id'] = book_id
-                st.session_state['selected_book_title'] = book_title
+                st.session_state['sel_bid'] = bid
+                st.session_state['sel_title'] = new_t
                 st.rerun()
 
-            if col2.button("🗑️", key=f"del_book_{book_id}", help="Delete Book"):
-                try:
-                    cur.execute("DELETE FROM books WHERE id = %s", (book_id,))
-                    conn.commit()
-                    if st.session_state['selected_book_id'] == book_id:
-                        st.session_state['selected_book_id'] = None
-                        st.session_state['selected_book_title'] = ""
-                    st.rerun()
-                except Exception as e:
-                    st.sidebar.error(f"Delete failed: {e}")
-    else:
-        st.sidebar.info("No books yet.")
+    st.sidebar.divider()
+    
+    for bid, title in books:
+        c1, c2 = st.sidebar.columns([4,1])
+        lbl = f"📂 {title}" if st.session_state['sel_bid'] == bid else f"📄 {title}"
+        if c1.button(lbl, key=f"open_{bid}"):
+            st.session_state['sel_bid'] = bid
+            st.session_state['sel_title'] = title
+            st.rerun()
+        if c2.button("🗑️", key=f"del_{bid}"):
+            cur.execute("DELETE FROM books WHERE id=%s", (bid,))
+            conn.commit()
+            st.rerun()
 
-    if st.session_state['selected_book_id']:
-        st.header(f"📖 {st.session_state['selected_book_title']}")
-        
-        cur.execute("SELECT id, topic, status, content FROM book_chapters WHERE book_id = %s ORDER BY id", (st.session_state['selected_book_id'],))
+    # Main Area
+    if st.session_state['sel_bid']:
+        st.header(f"📖 {st.session_state['sel_title']}")
+        cur.execute("SELECT id, topic, status, content FROM book_chapters WHERE book_id=%s ORDER BY id", (st.session_state['sel_bid'],))
         chapters = cur.fetchall()
         
-        if not chapters:
-            st.info("No chapters found.")
+        if not chapters: st.info("No chapters.")
         
-        for ch_id, ch_topic, ch_status, ch_content in chapters:
-            with st.expander(f"{ch_topic} [{ch_status}]"):
-                
-                if ch_status == "Draft":
-                    st.caption("📝 **Outline:**")
-                    st.write(ch_content if ch_content else "No outline available.")
-                elif ch_status == "Processing":
-                    st.info("AI Writer is active... (This may take a few minutes)")
-                    st.progress(60)
-                    if ch_content:
-                        word_count = len(ch_content.split())
-                        st.caption(f"Drafting... {word_count} words written so far.")
-                    time.sleep(5) 
+        for cid, topic, status, content in chapters:
+            with st.expander(f"{topic} [{status}]"):
+                if status == "Draft":
+                    st.caption("Outline:")
+                    st.write(content)
+                elif status == "Processing":
+                    st.info("AI writing...")
+                    st.progress(50)
+                    time.sleep(3)
                     st.rerun()
-                elif ch_status == "Completed":
-                    st.caption("✅ **Final Draft:**")
-                    st.markdown(ch_content[:500] + "...\n\n*(Preview truncated)*")
-
-                st.divider()
-
-                b_col1, b_col2, b_col3, b_col4 = st.columns(4)
-
-                with b_col1:
-                    if ch_status == "Draft":
-                        if st.button("🗺️ Map Plan", key=f"map_{ch_id}"):
-                            with st.spinner("Cartographer is mapping the outline..."):
-                                n_c, n_e = run_cartographer_task(ch_id, st.session_state['selected_book_id'], ch_content)
-                                st.success(f"Mapped: {n_c} Chars, {n_e} Events")
+                elif status == "Completed":
+                    st.markdown(content[:500]+"...")
                 
-                with b_col2:
-                    if ch_status in ["Draft", "Error"]:
-                        if st.button("✍️ Write Chapter", key=f"write_{ch_id}"):
-                            t = threading.Thread(target=background_writer_task, args=(ch_id, ch_topic, st.session_state['selected_book_title']))
-                            t.start()
-                    
+                st.divider()
+                c1, c2, c3, c4 = st.columns(4)
+                
+                # Button 1: Map (Draft Only)
+                if status == "Draft":
+                    if c1.button("🗺️ Map Plan", key=f"map_{cid}"):
+                        with st.spinner("Mapping..."):
+                            nc, ne = run_cartographer_task(cid, st.session_state['sel_bid'], content)
+                            st.success(f"Mapped {nc} chars, {ne} events")
+                
+                # Button 2: Write (Draft Only)
+                if status in ["Draft", "Error"]:
+                    if c2.button("✍️ Write", key=f"wr_{cid}"):
+                        t = threading.Thread(target=background_writer_task, args=(cid, topic, st.session_state['sel_title']))
+                        t.start()
+                        st.rerun()
+                
+                # Button 3: Download (Completed)
+                if status == "Completed":
+                    c3.download_button("📥 Text", content, file_name=f"{topic}.md")
+                
+                # Button 4: Audio (Completed)
+                if status == "Completed":
+                    if c4.button("🎧 Audio", key=f"au_{cid}"):
+                        aud = generate_audio_chapter(content)
+                        st.audio(aud, format='audio/mp3')
+
+    else:
+        st.info("Select a book from the sidebar.")
+
+    cur.close()
+    conn.close()
+
+if __name__ == "__main__":
+    main()
