@@ -222,26 +222,26 @@ if selected_book:
                     count, _ = run_cartographer(master_text)
                     st.success(f"Mapped {count} events from 10 sources.")
 
-            # 2. WRITE BUTTON (UPDATED FOR GEMINI WRITER + LENGTH)
+            # 2. WRITE BUTTON (UPDATED FOR GEMINI WRITER + 9000 WORDS)
             if col2.button("✍️ Write", key=f"write_{ch['id']}"):
-                with st.spinner("Researching & Writing (Gemini 2.5 Pro - Long Form)..."):
+                with st.spinner("Researching & Writing (Gemini 2.5 Pro - Massive Mode)..."):
                     # A. Context Chain
                     context_prompt = ""
                     if ch['chapter_number'] > 1:
                         prev_ch = next((x for x in chapters if x['chapter_number'] == ch['chapter_number'] - 1), None)
                         if prev_ch and prev_ch.get('content'):
-                            context_prompt = f"\n\nPREVIOUS CHAPTER CONTEXT:\n{prev_ch['content'][-5000:]}" # Increased context
+                            context_prompt = f"\n\nPREVIOUS CHAPTER CONTEXT:\n{prev_ch['content'][-5000:]}" 
                             st.info(f"🔗 Linked to Chapter {prev_ch['chapter_number']}")
 
-                    # B. Research (Deep Dive for Writing)
+                    # B. Research
                     search_query = f"{mission_brief} {ch['title']}"
-                    search = exa.search_and_contents(search_query, type="neural", num_results=10, text=True) # 10 Sources
+                    search = exa.search_and_contents(search_query, type="neural", num_results=10, text=True) 
                     
                     master_source = ""
                     for res in search.results:
                         master_source += f"\n--- Source: {res.title} ---\n{res.text[:25000]}\n"
                     
-                    # C. Write (Using Gemini instead of Perplexity)
+                    # C. Write
                     prompt = f"""
                     You are a professional non-fiction author. Write Chapter {ch['chapter_number']}: {ch['title']}.
                     
@@ -254,13 +254,12 @@ if selected_book:
                     
                     INSTRUCTIONS:
                     1. Write a detailed, immersive, non-fiction narrative.
-                    2. **LENGTH REQUIREMENT:** Produce AT LEAST 4,500 words. This is a strict requirement. Do not summarize.
+                    2. **LENGTH REQUIREMENT:** Produce AT LEAST 9,000 words. This is a massive, deep-dive chapter. Do not summarize.
                     3. Use ONLY the source material provided. Do not hallucinate dates or events.
                     4. Write scene-by-scene, including dialogue where historically supported, and vivid sensory details.
                     5. Ensure smooth continuity with the previous chapter.
                     """
                     
-                    # Using Gemini 2.5 Pro for writing
                     model = genai.GenerativeModel('gemini-2.5-pro')
                     response = model.generate_content(prompt)
                     content = response.text
