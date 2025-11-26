@@ -6,7 +6,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from exa_py import Exa  # Added Exa Library
+from exa_py import Exa
 from pydub import AudioSegment
 import io
 
@@ -41,24 +41,23 @@ def get_db_connection():
 def generate_blueprint(topic, briefing):
     """
     Uses Exa to research and Gemini to plan the Table of Contents.
+    FIXED: Uses 'gemini-2.0-flash-exp' which is the valid model ID.
     """
     with st.spinner("🕵️ The Architect is researching via Exa..."):
-        # 1. Research (Exa)
-        # We combine topic and briefing for a semantic search
         query = f"{topic}: {briefing}"
         search_response = exa.search_and_contents(
             query,
             num_results=10,
-            text=True  # Get full text content
+            text=True 
         )
         
-        # Compile research into a dossier
         dossier = ""
         for i, result in enumerate(search_response.results):
-            dossier += f"\n--- SOURCE {i+1} ---\nTitle: {result.title}\nContent: {result.text[:5000]}\n"
+            # Safe truncation to prevent token overflow
+            content_snippet = result.text[:2000] if result.text else "No text content."
+            dossier += f"\n--- SOURCE {i+1} ---\nTitle: {result.title}\nContent: {content_snippet}\n"
 
     with st.spinner("🏗️ The Architect is drafting the Table of Contents..."):
-        # 2. Planning (Gemini)
         prompt = f"""
         You are the Chief Editor of a non-fiction publishing house.
         
@@ -67,7 +66,7 @@ def generate_blueprint(topic, briefing):
         Mission Brief: {briefing}
         
         Use the following research to ensure factual accuracy and depth:
-        {dossier[:100000]} 
+        {dossier} 
 
         OUTPUT FORMAT:
         Return ONLY a list of chapter topics, one per line. 
@@ -76,15 +75,23 @@ def generate_blueprint(topic, briefing):
         Generate between 5 and 10 chapters.
         """
         
+        # FIXED: Model Name Update
         response = client.models.generate_content(
-            model="gemini-2.5-flash-preview",
+            model="gemini-2.0-flash-exp", 
             contents=prompt
         )
         
-        # Parse response into a list
         raw_text = response.text if response.text else ""
-        # Clean up lines (remove empty lines or numbering if AI hallucinated them)
-        chapters = [line.strip().lstrip("1234567890. ") for line in raw_text.split('\n') if line.strip()]
+        # Robust cleaning to handle "1. Chapter Name" or "- Chapter Name"
+        chapters = []
+        for line in raw_text.split('\n'):
+            clean_line = line.strip()
+            # Remove leading numbers, dots, and hyphens
+            while clean_line and (clean_line[0].isdigit() or clean_line[0] in ['.', '-', ' ']):
+                clean_line = clean_line[1:].strip()
+            
+            if clean_line:
+                chapters.append(clean_line)
         
         return chapters
 
@@ -92,6 +99,7 @@ def generate_blueprint(topic, briefing):
 # AGENT 1: THE AUDIO ENGINEER
 # ------------------------------------------------------------------
 def generate_audio_chapter(text_content, voice_model="Puck"):
+    # Chunking to safe limits (2k characters)
     chunk_size = 2000
     chunks = [text_content[i:i+chunk_size] for i in range(0, len(text_content), chunk_size)]
     combined_audio = AudioSegment.empty()
@@ -104,8 +112,9 @@ def generate_audio_chapter(text_content, voice_model="Puck"):
     with st.spinner(f"Generating Audio ({voice_model})..."):
         for index, chunk in enumerate(chunks):
             try:
+                # FIXED: Model Name Update
                 response = client.models.generate_content(
-                    model="gemini-2.5-flash-preview", 
+                    model="gemini-2.0-flash-exp", 
                     contents=f"Read the following text clearly and naturally:\n\n{chunk}",
                     config=types.GenerateContentConfig(
                         response_modalities=["AUDIO"], 
@@ -159,7 +168,6 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
     try:
         update_chapter_status(chapter_id, "Processing")
         
-        # Research specific to this chapter (Simulated or Real Exa call can go here)
         full_narrative = f"# {chapter_topic}\n\n"
         scenes = ["The Context", "The Events", "The Aftermath"]
         
@@ -167,8 +175,9 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
             time.sleep(2) 
             prompt = f"Write a narrative scene about '{scene}' for the chapter '{chapter_topic}'. Book Context: '{book_context}'."
             
+            # FIXED: Model Name Update
             response = client.models.generate_content(
-                model="gemini-2.5-flash-preview",
+                model="gemini-2.0-flash-exp",
                 contents=prompt
             )
             scene_text = response.text if response.text else ""
@@ -190,85 +199,3 @@ def main():
 
     st.sidebar.header("Library")
     conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # 1. Fetch Books
-    cur.execute("SELECT id, title FROM books ORDER BY id DESC")
-    books = cur.fetchall()
-    
-    # 2. Book Creator (UPDATED with Exa/Mission Brief)
-    with st.sidebar.expander("New Book", expanded=False):
-        new_topic = st.text_input("Book Topic", placeholder="e.g. The Fall of Rome")
-        # Added: Mission Brief Input
-        mission_brief = st.text_area("Mission Brief", placeholder="Focus on economic factors...")
-        
-        if st.button("Draft Blueprint"):
-            if new_topic and mission_brief:
-                # A. Create Book Entry
-                cur.execute("INSERT INTO books (title) VALUES (%s) RETURNING id", (new_topic,))
-                new_book_id = cur.fetchone()[0]
-                conn.commit() # Commit early to get ID
-                
-                # B. Run Architect Agent
-                generated_chapters = generate_blueprint(new_topic, mission_brief)
-                
-                # C. Insert Chapters
-                for chapter_title in generated_chapters:
-                    # NOTE: Assuming 'book_id' column exists. If user insists on 'id' being the FK, change 'book_id' to 'id'.
-                    # Standard SQL: book_chapters(id PK, book_id FK, topic, status)
-                    cur.execute(
-                        "INSERT INTO book_chapters (book_id, topic, status) VALUES (%s, %s, 'Draft')", 
-                        (new_book_id, chapter_title)
-                    )
-                conn.commit()
-                st.success(f"Blueprint created with {len(generated_chapters)} chapters!")
-                time.sleep(1)
-                st.rerun()
-            else:
-                st.warning("Please provide both a Topic and a Mission Brief.")
-
-    # 3. Book Selector
-    if books:
-        book_options = {b[1]: b[0] for b in books}
-        selected_title = st.sidebar.selectbox("Select Book", list(book_options.keys()))
-        selected_id = book_options[selected_title]
-        st.session_state['book_topic'] = selected_title 
-        
-        st.sidebar.markdown("---")
-        
-        # 4. Fetch Chapters
-        # Note: 'book_id' is the standard FK column name.
-        cur.execute("SELECT id, topic, status, content FROM book_chapters WHERE book_id = %s ORDER BY id", (selected_id,))
-        chapters = cur.fetchall()
-        
-        for ch_id, ch_topic, ch_status, ch_content in chapters:
-            with st.expander(f"{ch_topic} [{ch_status}]"):
-                if ch_status in ["Draft", "Error"]:
-                    if st.button(f"Write Chapter", key=f"write_{ch_id}"):
-                        t = threading.Thread(
-                            target=background_writer_task, 
-                            args=(ch_id, ch_topic, st.session_state.get('book_topic'))
-                        )
-                        t.start()
-                        st.rerun()
-                
-                elif ch_status == "Processing":
-                    st.info("AI Writer is active...")
-                    if ch_content:
-                        st.metric("Words", len(ch_content.split()))
-                    st.progress(60)
-                    time.sleep(3)
-                    st.rerun()
-                
-                elif ch_status == "Completed":
-                    st.markdown(ch_content[:500] + "...")
-                    st.download_button("Download Text", ch_content, file_name=f"{ch_topic}.md")
-                    if st.button("Produce Audio", key=f"audio_{ch_id}"):
-                        audio_data = generate_audio_chapter(ch_content)
-                        st.audio(audio_data, format='audio/mp3')
-
-    cur.close()
-    conn.close()
-
-if __name__ == "__main__":
-    main()
