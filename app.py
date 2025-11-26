@@ -189,13 +189,12 @@ def generate_audio_chapter(text_content, voice_model="Puck"):
 def run_cartographer_task(chapter_id, book_id, content):
     try:
         # Prompt Gemini for structured data extraction
-        prompt = f"""
-        Analyze this text. Extract structured data.
-        TEXT: {content[:30000]}
+        # Use safe concatenation for large text content
+        prompt = "Analyze this text. Extract structured data.\nTEXT: " + content[:30000] + """
         
         OUTPUT JSON keys:
-        1. "characters": list of {{"name": "...", "role": "...", "description": "..."}}
-        2. "timeline": list of {{"character_name": "...", "location": "...", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}}
+        1. "characters": list of {"name": "...", "role": "...", "description": "..."}
+        2. "timeline": list of {"character_name": "...", "location": "...", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}
         """
         response = client.models.generate_content(
             model="gemini-2.0-flash-exp",
@@ -290,7 +289,11 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
         # Query Exa using the Chapter Summary
         full_source_text = ""
         try:
-            exa_query = f"{chapter_topic}: {chapter_summary}"
+            # Safe replacement for curly braces in search query
+            safe_topic = chapter_topic.replace("{", "").replace("}", "")
+            safe_summary = chapter_summary.replace("{", "").replace("}", "")
+            exa_query = f"{safe_topic}: {safe_summary}"
+            
             search_response = exa.search_and_contents(exa_query, num_results=10, text=True)
             for i, res in enumerate(search_response.results):
                 text_content = res.text[:15000] if res.text else ""
@@ -487,10 +490,4 @@ def main():
 
                 st.divider()
 
-                b_col1, b_col2, b_col3, b_col4 = st.columns(4)
-
-                with b_col1:
-                    # Map Button (Draft Phase)
-                    if ch_status == "Draft":
-                        if st.button("🗺️ Map Plan", key=f"map_{ch_id}"):
-                            with st.spinner("Carto
+                b_col1, b_col2, b_col3, b_col4 
