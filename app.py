@@ -275,6 +275,6 @@ if selected_book:
                     st.error(f"PDF Error: {e}")
 
 else:
-    st.info("👈 Create or Select a Project to begin.")
+    st.info("👈 Create or Select a Project to begin."
 
 
