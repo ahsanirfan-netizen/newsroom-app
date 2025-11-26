@@ -113,6 +113,8 @@ def generate_blueprint(topic, briefing):
         if search_response and search_response.results:
             for i, result in enumerate(search_response.results):
                 content_snippet = result.text[:2000] if result.text else "No text."
+                # Sanitize snippet to prevent F-string crashes in logs/display
+                content_snippet = content_snippet.replace("{", "(").replace("}", ")")
                 dossier += f"\n--- SOURCE {i+1} ---\nTitle: {result.title}\nContent: {content_snippet}\n"
 
     with st.spinner("🏗️ The Architect is drafting the Table of Contents..."):
@@ -185,10 +187,6 @@ def generate_audio_chapter(text_content, voice_model="Puck"):
 # AGENT 3: THE CARTOGRAPHER (Mapping)
 # ------------------------------------------------------------------
 def run_cartographer_task(chapter_id, book_id, content):
-    """
-    Extracts entities and timeline events from chapter text.
-    Populates 'characters' and 'timeline' tables.
-    """
     try:
         # Prompt Gemini for structured data extraction
         prompt = f"""
@@ -269,7 +267,7 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Get Book ID and the "Draft Content" (which is now the Summary)
+        # Get Book ID and the "Draft Content" (Summary)
         cur.execute("SELECT book_id, content FROM book_chapters WHERE id = %s", (chapter_id,))
         result = cur.fetchone()
         book_id = result[0]
@@ -289,41 +287,31 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
         conn.close()
 
         # 2. DEEP RESEARCH (EXA)
-        # We query Exa using the Chapter Summary
+        # Query Exa using the Chapter Summary
         full_source_text = ""
         try:
             exa_query = f"{chapter_topic}: {chapter_summary}"
             search_response = exa.search_and_contents(exa_query, num_results=10, text=True)
             for i, res in enumerate(search_response.results):
-                text_content = res.text[:15000] if res.text else "" # Truncate individual sources to avoid excessive noise
+                text_content = res.text[:15000] if res.text else ""
+                # CRITICAL FIX: Escape braces to prevent F-string crash
+                text_content = text_content.replace("{", "(").replace("}", ")")
                 full_source_text += f"\n[SOURCE {i+1}]: {res.title}\n{text_content}\n"
         except Exception as e:
             print(f"Exa Research Error: {e}")
-            full_source_text = "No deep research available. Rely on internal knowledge."
+            full_source_text = "Internal knowledge only."
 
-        # 3. BUILD MASTER CONTEXT (THE CACHE)
-        MASTER_CONTEXT = f"""
-        BOOK TITLE: {book_context}
-        CHAPTER TOPIC: {chapter_topic}
-        CHAPTER SUMMARY/GOAL: {chapter_summary}
-        
-        CHARACTERS:
-        {char_context}
-        
-        TIMELINE EVENTS:
-        {timeline_context}
-        
-        RESEARCH SOURCES:
-        {full_source_text[:200000]} # Limit to ~200k chars to be safe inside prompts
-        """
+        # 3. BUILD MASTER CONTEXT (Safe Concatenation)
+        # We concatenate large blocks to avoid F-string errors with raw text
+        MASTER_CONTEXT = f"BOOK: {book_context}\nCHAPTER: {chapter_topic}\nSUMMARY: {chapter_summary}\n\nCHARACTERS:\n{char_context}\n\nTIMELINE:\n{timeline_context}\n\nRESEARCH:\n"
+        MASTER_CONTEXT += full_source_text[:200000] # Append safe research text
 
         # 4. SUB-TOPIC PLANNING
-        # Ask Gemini to break the chapter into logical subtopics based on the research
         plan_prompt = f"""
         You are the Architect. Based on the MASTER CONTEXT provided below, outline the subtopics (scenes) for this chapter.
         
-        MASTER CONTEXT:
-        {MASTER_CONTEXT[:50000]} # Send partial context for planning
+        MASTER CONTEXT (Truncated for planning):
+        {MASTER_CONTEXT[:50000]}
         
         OUTPUT: Return a JSON list of strings, where each string is a subtopic title.
         Example: ["The Arrival", "The Debate", "The Decision"]
@@ -339,35 +327,31 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
             subtopics = json.loads(plan_res.text)
             if isinstance(subtopics, dict): subtopics = subtopics.get("subtopics", list(subtopics.values())[0])
         except Exception:
-            subtopics = ["Introduction", "Main Event", "Conclusion"] # Fallback
+            subtopics = ["Introduction", "Main Conflict", "Resolution"]
 
         # 5. RECURSIVE WRITING LOOP
         full_narrative = f"# {chapter_topic}\n\n"
         previous_summary = "The chapter begins."
         
         for subtopic in subtopics:
-            time.sleep(2) # Rate limit safety
+            time.sleep(2) 
             
-            # The Recursive Prompt
             write_prompt = f"""
             Write a section of a history book.
             
             CURRENT SUBTOPIC: {subtopic}
-            PREVIOUS SECTION SUMMARY: {previous_summary} (Maintain continuity from this).
+            PREVIOUS SECTION SUMMARY: {previous_summary} (Maintain continuity).
             
-            MASTER CONTEXT (Research/Facts):
-            {MASTER_CONTEXT}
+            MASTER CONTEXT:
+            {MASTER_CONTEXT[:100000]} 
             
             INSTRUCTIONS:
-            1. Write 500-1000 words of engaging, factual narrative for this subtopic.
-            2. Use the Research Sources provided to add specific details.
-            3. Generate a short summary of what you just wrote (to pass to the next section).
+            1. Write 500-1000 words of factual narrative.
+            2. Use the Research Sources provided.
+            3. Generate a summary for the next section.
             
             OUTPUT JSON:
-            {{
-                "text": "The 500-1000 word narrative...",
-                "summary": "A 2-sentence summary of events..."
-            }}
+            {{ "text": "...", "summary": "..." }}
             """
             
             try:
@@ -381,17 +365,16 @@ def background_writer_task(chapter_id, chapter_topic, book_context):
                 new_text = data.get("text", "")
                 new_summary = data.get("summary", "")
                 
-                # Append and Update DB immediately
+                # Append and Update DB
                 full_narrative += f"## {subtopic}\n{new_text}\n\n"
-                previous_summary = new_summary # Carry forward
+                previous_summary = new_summary 
                 
                 update_chapter_status(chapter_id, "Processing", full_narrative)
                 
             except Exception as e:
                 print(f"Error writing subtopic {subtopic}: {e}")
-                full_narrative += f"\n\n[Error writing section: {subtopic}]\n\n"
+                full_narrative += f"\n\n[Section Error: {subtopic}]\n\n"
         
-        # Final Save
         update_chapter_status(chapter_id, "Completed", full_narrative)
 
     except Exception as e:
@@ -496,8 +479,18 @@ def main():
                         # Count words to show progress
                         word_count = len(ch_content.split())
                         st.caption(f"Drafting... {word_count} words written so far.")
-                    time.sleep(5) # Slow poll for long writes
+                    time.sleep(5) 
                     st.rerun()
                 elif ch_status == "Completed":
                     st.caption("✅ **Final Draft:**")
-       
+                    st.markdown(ch_content[:500] + "...\n\n*(Preview truncated)*")
+
+                st.divider()
+
+                b_col1, b_col2, b_col3, b_col4 = st.columns(4)
+
+                with b_col1:
+                    # Map Button (Draft Phase)
+                    if ch_status == "Draft":
+                        if st.button("🗺️ Map Plan", key=f"map_{ch_id}"):
+                            with st.spinner("Carto
