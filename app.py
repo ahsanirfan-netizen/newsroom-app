@@ -48,16 +48,15 @@ def run_architect(book_concept):
         search = exa.search_and_contents(
             f"Comprehensive history, timeline, and academic analysis of: {book_concept}",
             type="neural",
-            num_results=10, # <--- FETCH 10 SOURCES
+            num_results=10, 
             text=True
         )
         
         # 2. AGGREGATE: Stitch them into one massive context
         grounding_text = f"RESEARCH DOSSIER FOR: {book_concept}\n\n"
         for i, result in enumerate(search.results):
-            # We take up to 20,000 chars per source (Gemini Pro has 1M+ token window, so this is easy)
             grounding_text += f"--- SOURCE {i+1}: {result.title} ({result.url}) ---\n"
-            grounding_text += f"{result.text[:25000]}\n\n"
+            grounding_text += f"{result.text[:25000]}\n\n" 
             
     except Exception as e:
         st.warning(f"Deep search failed ({e}). Relying on internal knowledge.")
@@ -99,7 +98,6 @@ def run_architect(book_concept):
         return False, str(e)
 
 def run_cartographer(source_text):
-    # NOTE: We increased the limit to 150,000 chars to handle larger inputs if needed
     prompt = f"""
     Extract structured timeline. TEXT: {source_text[:150000]}
     JSON OUTPUT ONLY: [ {{"character_name": "...", "location": "...", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}} ]
@@ -200,6 +198,9 @@ if selected_book:
             st.write(f"**Goal:** {ch['summary_goal']}")
             
             if ch.get('content'):
+                # Word Count
+                word_count = len(ch['content'].split())
+                st.caption(f"📝 Word Count: {word_count}")
                 st.markdown("---")
                 st.markdown(ch['content'])
             
