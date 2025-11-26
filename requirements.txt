@@ -8,3 +8,5 @@ python-dotenv
 pydantic
 psycopg2-binary
 fpdf2
+gTTS
+pydub
