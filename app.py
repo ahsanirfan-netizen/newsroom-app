@@ -38,17 +38,39 @@ def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"))
 
 # ------------------------------------------------------------------
-# 2. SCHEMA CHECK
+# 2. SCHEMA CHECK (UPDATED FOR AUDIO PERSISTENCE)
 # ------------------------------------------------------------------
 def run_schema_check():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # Base Tables
         cur.execute("CREATE TABLE IF NOT EXISTS books (id SERIAL PRIMARY KEY, title TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());")
         cur.execute("CREATE TABLE IF NOT EXISTS book_chapters (id SERIAL PRIMARY KEY, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE, topic TEXT NOT NULL, status TEXT DEFAULT 'Draft', content TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());")
         cur.execute("CREATE TABLE IF NOT EXISTS characters (id SERIAL PRIMARY KEY, name TEXT NOT NULL, role TEXT, description TEXT, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE);")
         cur.execute("CREATE TABLE IF NOT EXISTS timeline (id SERIAL PRIMARY KEY, character_name TEXT, location TEXT, start_date DATE, end_date DATE, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE, chapter_id INTEGER);")
         cur.execute("CREATE TABLE IF NOT EXISTS table_of_contents (id SERIAL PRIMARY KEY, content JSONB, book_id INTEGER UNIQUE REFERENCES books(id) ON DELETE CASCADE);")
+
+        # UPDATE: Add Audio Columns if they don't exist
+        cur.execute("""
+            DO $$ 
+            BEGIN 
+                -- Track Audio Status (e.g., 'None', 'Processing', 'Completed')
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='book_chapters' AND column_name='audio_status') THEN
+                    ALTER TABLE book_chapters ADD COLUMN audio_status TEXT DEFAULT 'None';
+                END IF;
+                -- Track Progress Message (e.g., "Generating chunk 3/10")
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='book_chapters' AND column_name='audio_msg') THEN
+                    ALTER TABLE book_chapters ADD COLUMN audio_msg TEXT;
+                END IF;
+                -- Store the actual MP3 file (Binary Data)
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='book_chapters' AND column_name='audio_data') THEN
+                    ALTER TABLE book_chapters ADD COLUMN audio_data BYTEA;
+                END IF;
+            END $$;
+        """)
+
         conn.commit()
         cur.close()
         conn.close()
@@ -91,7 +113,6 @@ def generate_blueprint(topic, briefing):
     with st.spinner("Architect drafting..."):
         prompt = f"Create a book TOC (JSON list of objects with keys 'topic', 'content').\nTopic: {topic}\nBrief: {briefing}\nContext: {dossier}"
         try:
-            # Use stable Gemini 2.5 Flash for logic
             res = client.models.generate_content(
                 model="gemini-2.5-flash", 
                 contents=prompt,
@@ -102,55 +123,9 @@ def generate_blueprint(topic, briefing):
             return data
         except: return []
 
-def generate_audio_chapter(text, voice="Puck"):
-    if not text or len(text) < 10: return None
-    chunks = split_text_safe(text, max_chars=2500)
-    combined_audio = AudioSegment.empty()
-    prog_bar = st.progress(0)
-    
-    with st.spinner(f"Generating Audio ({len(chunks)} segments)..."):
-        for i, chunk in enumerate(chunks):
-            try:
-                # CORRECT MODEL ID: gemini-2.5-flash-preview-tts
-                res = client.models.generate_content(
-                    model="gemini-2.5-flash-preview-tts", 
-                    contents=f"Read this text naturally:\n\n{chunk}",
-                    config=types.GenerateContentConfig(
-                        response_modalities=["AUDIO"],
-                        speech_config=types.SpeechConfig(
-                            voice_config=types.VoiceConfig(
-                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
-                            )
-                        )
-                    )
-                )
-                
-                if res.candidates and res.candidates[0].content.parts:
-                    part = res.candidates[0].content.parts[0]
-                    if part.inline_data:
-                        seg = AudioSegment(data=part.inline_data.data, sample_width=2, frame_rate=24000, channels=1)
-                        seg = normalize(seg)
-                        if i == 0: combined_audio = seg
-                        else: combined_audio = combined_audio.append(seg, crossfade=100)
-                
-                prog_bar.progress((i + 1) / len(chunks))
-                time.sleep(1) 
-                
-            except Exception as e:
-                st.error(f"Error on segment {i+1}: {e}")
-                return None
-            
-    if len(combined_audio) > 0:
-        combined_audio = normalize(combined_audio)
-        buf = io.BytesIO()
-        combined_audio.export(buf, format="mp3")
-        return buf
-    return None
-
 def run_cartographer_task(chapter_id, book_id, content):
     try:
         prompt = "Extract JSON: {'characters': [{'name','role','description'}], 'timeline': [{'character_name','location','start_date','end_date'}]}.\nTEXT: " + content[:30000]
-        # Use stable Gemini 2.5 Flash
         res = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
@@ -178,6 +153,9 @@ def run_cartographer_task(chapter_id, book_id, content):
         print(e)
         return 0, 0
 
+# ------------------------------------------------------------------
+# DB UPDATE HELPER
+# ------------------------------------------------------------------
 def update_status(cid, status, text=None):
     try:
         conn = get_db_connection()
@@ -189,6 +167,24 @@ def update_status(cid, status, text=None):
         conn.close()
     except: pass
 
+def update_audio_status(cid, status, msg=None, data=None):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        if data:
+            # Saving binary MP3
+            cur.execute("UPDATE book_chapters SET audio_status=%s, audio_msg=%s, audio_data=%s WHERE id=%s", (status, msg, psycopg2.Binary(data), cid))
+        else:
+            cur.execute("UPDATE book_chapters SET audio_status=%s, audio_msg=%s WHERE id=%s", (status, msg, cid))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"Audio DB Error: {e}")
+
+# ------------------------------------------------------------------
+# WORKER: TEXT WRITER
+# ------------------------------------------------------------------
 def background_writer_task(chapter_id, topic, book_title):
     try:
         update_status(chapter_id, "Processing")
@@ -226,7 +222,6 @@ def background_writer_task(chapter_id, topic, book_title):
 
         plan_prompt = f"Outline subtopics (JSON list of strings).\nCONTEXT: {MASTER[:50000]}"
         try:
-            # Use stable Gemini 2.5 Flash
             res = client.models.generate_content(model="gemini-2.5-flash", contents=plan_prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
             subtopics = json.loads(res.text)
             if isinstance(subtopics, dict): subtopics = list(subtopics.values())[0]
@@ -245,7 +240,6 @@ def background_writer_task(chapter_id, topic, book_title):
             CONTEXT: {MASTER[:100000]}
             """
             try:
-                # Use stable Gemini 2.5 Flash
                 w_res = client.models.generate_content(model="gemini-2.5-flash", contents=wp, config=types.GenerateContentConfig(response_mime_type="application/json"))
                 wd = json.loads(w_res.text)
                 narrative += f"## {sub}\n{wd.get('text','')}\n\n"
@@ -256,6 +250,69 @@ def background_writer_task(chapter_id, topic, book_title):
         update_status(chapter_id, "Completed", narrative)
     except:
         update_status(chapter_id, "Error")
+
+# ------------------------------------------------------------------
+# WORKER: AUDIO ENGINEER (NEW)
+# ------------------------------------------------------------------
+def background_audio_task(chapter_id, text, voice="Puck"):
+    try:
+        # 1. Start Job
+        update_audio_status(chapter_id, "Processing", msg="Initializing Audio Engine...")
+        
+        if not text or len(text) < 10:
+            update_audio_status(chapter_id, "Error", msg="Text too short.")
+            return
+
+        chunks = split_text_safe(text, max_chars=2500)
+        combined_audio = AudioSegment.empty()
+        
+        # 2. Process Chunks
+        for i, chunk in enumerate(chunks):
+            # Update DB with progress so UI can see it
+            progress_msg = f"Generating segment {i+1} of {len(chunks)}..."
+            update_audio_status(chapter_id, "Processing", msg=progress_msg)
+            
+            try:
+                res = client.models.generate_content(
+                    model="gemini-2.0-flash-exp", # Using 2.0-exp for Audio support
+                    contents=f"Read this text naturally:\n\n{chunk}",
+                    config=types.GenerateContentConfig(
+                        response_modalities=["AUDIO"],
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+                            )
+                        )
+                    )
+                )
+                
+                if res.candidates and res.candidates[0].content.parts:
+                    part = res.candidates[0].content.parts[0]
+                    if part.inline_data:
+                        seg = AudioSegment(data=part.inline_data.data, sample_width=2, frame_rate=24000, channels=1)
+                        seg = normalize(seg)
+                        if i == 0: combined_audio = seg
+                        else: combined_audio = combined_audio.append(seg, crossfade=100)
+                
+                time.sleep(2) # Rate limit safety
+                
+            except Exception as e:
+                print(f"Audio Chunk Error: {e}")
+                # Continue trying other chunks or fail? Best to fail or skip.
+        
+        # 3. Finalize
+        if len(combined_audio) > 0:
+            combined_audio = normalize(combined_audio)
+            buf = io.BytesIO()
+            combined_audio.export(buf, format="mp3")
+            # Save MP3 blob to DB
+            update_audio_status(chapter_id, "Completed", msg="Ready", data=buf.getvalue())
+        else:
+            update_audio_status(chapter_id, "Error", msg="No audio generated.")
+
+    except Exception as e:
+        print(f"Audio Critical Error: {e}")
+        update_audio_status(chapter_id, "Error", msg=f"Failed: {str(e)[:50]}")
 
 # ------------------------------------------------------------------
 # 5. UI MAIN LOOP
@@ -305,12 +362,13 @@ def main():
 
     if st.session_state['sel_bid']:
         st.header(f"📖 {st.session_state['sel_title']}")
-        cur.execute("SELECT id, topic, status, content FROM book_chapters WHERE book_id=%s ORDER BY id", (st.session_state['sel_bid'],))
+        # Select Audio Columns too
+        cur.execute("SELECT id, topic, status, content, audio_status, audio_msg, audio_data FROM book_chapters WHERE book_id=%s ORDER BY id", (st.session_state['sel_bid'],))
         chapters = cur.fetchall()
         
         if not chapters: st.info("No chapters.")
         
-        for cid, topic, status, content in chapters:
+        for cid, topic, status, content, aud_stat, aud_msg, aud_data in chapters:
             with st.expander(f"{topic} [{status}]"):
                 if status == "Draft":
                     st.caption("Outline:")
@@ -326,25 +384,48 @@ def main():
                 st.divider()
                 c1, c2, c3, c4 = st.columns(4)
                 
+                # MAP
                 if status == "Draft":
                     if c1.button("🗺️ Map Plan", key=f"map_{cid}"):
                         with st.spinner("Mapping..."):
                             nc, ne = run_cartographer_task(cid, st.session_state['sel_bid'], content)
                             st.success(f"Mapped {nc} chars, {ne} events")
                 
+                # WRITE
                 if status in ["Draft", "Error"]:
                     if c2.button("✍️ Write", key=f"wr_{cid}"):
                         t = threading.Thread(target=background_writer_task, args=(cid, topic, st.session_state['sel_title']))
                         t.start()
                         st.rerun()
                 
+                # DOWNLOAD
                 if status == "Completed":
                     c3.download_button("📥 Text", content, file_name=f"{topic}.md")
                 
+                # AUDIO
                 if status == "Completed":
-                    if c4.button("🎧 Audio", key=f"au_{cid}"):
-                        aud = generate_audio_chapter(content)
-                        if aud: st.audio(aud, format='audio/mp3')
+                    # State 1: Ready to Generate
+                    if not aud_stat or aud_stat == "None" or aud_stat == "Error":
+                        if c4.button("🎧 Generate Audio", key=f"au_gen_{cid}"):
+                            # Start Background Thread
+                            t = threading.Thread(target=background_audio_task, args=(cid, content))
+                            t.start()
+                            st.rerun()
+                    
+                    # State 2: Processing (Polling)
+                    elif aud_stat == "Processing":
+                        c4.info("🎙️ " + (aud_msg if aud_msg else "Initializing..."))
+                        time.sleep(3) # Poll DB every 3s
+                        st.rerun()
+                        
+                    # State 3: Done (Show Player)
+                    elif aud_stat == "Completed" and aud_data:
+                        c4.audio(bytes(aud_data), format='audio/mp3')
+                        # Optional: Allow re-generation
+                        if c4.button("🔄 Regenerate Audio", key=f"au_regen_{cid}"):
+                             t = threading.Thread(target=background_audio_task, args=(cid, content))
+                             t.start()
+                             st.rerun()
 
     else:
         st.info("Select a book from the sidebar.")
