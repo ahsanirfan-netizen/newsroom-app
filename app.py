@@ -38,39 +38,34 @@ def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"))
 
 # ------------------------------------------------------------------
-# 2. SCHEMA CHECK (UPDATED FOR AUDIO PERSISTENCE)
+# 2. SCHEMA CHECK
 # ------------------------------------------------------------------
 def run_schema_check():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # Base Tables
         cur.execute("CREATE TABLE IF NOT EXISTS books (id SERIAL PRIMARY KEY, title TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());")
         cur.execute("CREATE TABLE IF NOT EXISTS book_chapters (id SERIAL PRIMARY KEY, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE, topic TEXT NOT NULL, status TEXT DEFAULT 'Draft', content TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());")
         cur.execute("CREATE TABLE IF NOT EXISTS characters (id SERIAL PRIMARY KEY, name TEXT NOT NULL, role TEXT, description TEXT, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE);")
         cur.execute("CREATE TABLE IF NOT EXISTS timeline (id SERIAL PRIMARY KEY, character_name TEXT, location TEXT, start_date DATE, end_date DATE, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE, chapter_id INTEGER);")
         cur.execute("CREATE TABLE IF NOT EXISTS table_of_contents (id SERIAL PRIMARY KEY, content JSONB, book_id INTEGER UNIQUE REFERENCES books(id) ON DELETE CASCADE);")
-
-        # UPDATE: Add Audio Columns if they don't exist
+        
+        # Audio columns check
         cur.execute("""
             DO $$ 
             BEGIN 
-                -- Track Audio Status (e.g., 'None', 'Processing', 'Completed')
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='book_chapters' AND column_name='audio_status') THEN
                     ALTER TABLE book_chapters ADD COLUMN audio_status TEXT DEFAULT 'None';
                 END IF;
-                -- Track Progress Message (e.g., "Generating chunk 3/10")
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='book_chapters' AND column_name='audio_msg') THEN
                     ALTER TABLE book_chapters ADD COLUMN audio_msg TEXT;
                 END IF;
-                -- Store the actual MP3 file (Binary Data)
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='book_chapters' AND column_name='audio_data') THEN
                     ALTER TABLE book_chapters ADD COLUMN audio_data BYTEA;
                 END IF;
             END $$;
         """)
-
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -153,9 +148,6 @@ def run_cartographer_task(chapter_id, book_id, content):
         print(e)
         return 0, 0
 
-# ------------------------------------------------------------------
-# DB UPDATE HELPER
-# ------------------------------------------------------------------
 def update_status(cid, status, text=None):
     try:
         conn = get_db_connection()
@@ -172,7 +164,6 @@ def update_audio_status(cid, status, msg=None, data=None):
         conn = get_db_connection()
         cur = conn.cursor()
         if data:
-            # Saving binary MP3
             cur.execute("UPDATE book_chapters SET audio_status=%s, audio_msg=%s, audio_data=%s WHERE id=%s", (status, msg, psycopg2.Binary(data), cid))
         else:
             cur.execute("UPDATE book_chapters SET audio_status=%s, audio_msg=%s WHERE id=%s", (status, msg, cid))
@@ -252,11 +243,10 @@ def background_writer_task(chapter_id, topic, book_title):
         update_status(chapter_id, "Error")
 
 # ------------------------------------------------------------------
-# WORKER: AUDIO ENGINEER (NEW)
+# WORKER: AUDIO ENGINEER (FAIL-FAST VERSION)
 # ------------------------------------------------------------------
 def background_audio_task(chapter_id, text, voice="Puck"):
     try:
-        # 1. Start Job
         update_audio_status(chapter_id, "Processing", msg="Initializing Audio Engine...")
         
         if not text or len(text) < 10:
@@ -266,26 +256,41 @@ def background_audio_task(chapter_id, text, voice="Puck"):
         chunks = split_text_safe(text, max_chars=2500)
         combined_audio = AudioSegment.empty()
         
-        # 2. Process Chunks
         for i, chunk in enumerate(chunks):
-            # Update DB with progress so UI can see it
-            progress_msg = f"Generating segment {i+1} of {len(chunks)}..."
-            update_audio_status(chapter_id, "Processing", msg=progress_msg)
+            update_audio_status(chapter_id, "Processing", msg=f"Generating segment {i+1} of {len(chunks)}...")
             
             try:
-                res = client.models.generate_content(
-                    model="gemini-2.0-flash-exp", # Using 2.0-exp for Audio support
-                    contents=f"Read this text naturally:\n\n{chunk}",
-                    config=types.GenerateContentConfig(
-                        response_modalities=["AUDIO"],
-                        speech_config=types.SpeechConfig(
-                            voice_config=types.VoiceConfig(
-                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+                # Primary Attempt: 2.0 Flash Exp
+                model_name = "gemini-2.0-flash-exp"
+                try:
+                    res = client.models.generate_content(
+                        model=model_name,
+                        contents=f"Read this text naturally:\n\n{chunk}",
+                        config=types.GenerateContentConfig(
+                            response_modalities=["AUDIO"],
+                            speech_config=types.SpeechConfig(
+                                voice_config=types.VoiceConfig(
+                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+                                )
                             )
                         )
                     )
-                )
-                
+                except Exception:
+                    # Fallback Attempt: 2.0 Flash (Stable)
+                    model_name = "gemini-2.0-flash"
+                    res = client.models.generate_content(
+                        model=model_name,
+                        contents=f"Read this text naturally:\n\n{chunk}",
+                        config=types.GenerateContentConfig(
+                            response_modalities=["AUDIO"],
+                            speech_config=types.SpeechConfig(
+                                voice_config=types.VoiceConfig(
+                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+                                )
+                            )
+                        )
+                    )
+
                 if res.candidates and res.candidates[0].content.parts:
                     part = res.candidates[0].content.parts[0]
                     if part.inline_data:
@@ -293,26 +298,29 @@ def background_audio_task(chapter_id, text, voice="Puck"):
                         seg = normalize(seg)
                         if i == 0: combined_audio = seg
                         else: combined_audio = combined_audio.append(seg, crossfade=100)
+                    else:
+                        raise ValueError("No inline_data received from API")
+                else:
+                    raise ValueError("Empty candidate response from API")
                 
-                time.sleep(2) # Rate limit safety
+                time.sleep(2) 
                 
             except Exception as e:
-                print(f"Audio Chunk Error: {e}")
-                # Continue trying other chunks or fail? Best to fail or skip.
+                # FAIL FAST: Report the exact error to DB and Stop
+                error_msg = f"API Error on Chunk {i+1}: {str(e)}"
+                update_audio_status(chapter_id, "Error", msg=error_msg)
+                return 
         
-        # 3. Finalize
         if len(combined_audio) > 0:
             combined_audio = normalize(combined_audio)
             buf = io.BytesIO()
             combined_audio.export(buf, format="mp3")
-            # Save MP3 blob to DB
             update_audio_status(chapter_id, "Completed", msg="Ready", data=buf.getvalue())
         else:
             update_audio_status(chapter_id, "Error", msg="No audio generated.")
 
     except Exception as e:
-        print(f"Audio Critical Error: {e}")
-        update_audio_status(chapter_id, "Error", msg=f"Failed: {str(e)[:50]}")
+        update_audio_status(chapter_id, "Error", msg=f"Critical: {str(e)[:100]}")
 
 # ------------------------------------------------------------------
 # 5. UI MAIN LOOP
@@ -346,92 +354,4 @@ def main():
                 st.session_state['sel_title'] = new_t
                 st.rerun()
 
-    st.sidebar.divider()
-    
-    for bid, title in books:
-        c1, c2 = st.sidebar.columns([4,1])
-        lbl = f"📂 {title}" if st.session_state['sel_bid'] == bid else f"📄 {title}"
-        if c1.button(lbl, key=f"open_{bid}"):
-            st.session_state['sel_bid'] = bid
-            st.session_state['sel_title'] = title
-            st.rerun()
-        if c2.button("🗑️", key=f"del_{bid}"):
-            cur.execute("DELETE FROM books WHERE id=%s", (bid,))
-            conn.commit()
-            st.rerun()
-
-    if st.session_state['sel_bid']:
-        st.header(f"📖 {st.session_state['sel_title']}")
-        # Select Audio Columns too
-        cur.execute("SELECT id, topic, status, content, audio_status, audio_msg, audio_data FROM book_chapters WHERE book_id=%s ORDER BY id", (st.session_state['sel_bid'],))
-        chapters = cur.fetchall()
-        
-        if not chapters: st.info("No chapters.")
-        
-        for cid, topic, status, content, aud_stat, aud_msg, aud_data in chapters:
-            with st.expander(f"{topic} [{status}]"):
-                if status == "Draft":
-                    st.caption("Outline:")
-                    st.write(content)
-                elif status == "Processing":
-                    st.info("AI writing...")
-                    st.progress(50)
-                    time.sleep(3)
-                    st.rerun()
-                elif status == "Completed":
-                    st.markdown(content[:500]+"...")
-                
-                st.divider()
-                c1, c2, c3, c4 = st.columns(4)
-                
-                # MAP
-                if status == "Draft":
-                    if c1.button("🗺️ Map Plan", key=f"map_{cid}"):
-                        with st.spinner("Mapping..."):
-                            nc, ne = run_cartographer_task(cid, st.session_state['sel_bid'], content)
-                            st.success(f"Mapped {nc} chars, {ne} events")
-                
-                # WRITE
-                if status in ["Draft", "Error"]:
-                    if c2.button("✍️ Write", key=f"wr_{cid}"):
-                        t = threading.Thread(target=background_writer_task, args=(cid, topic, st.session_state['sel_title']))
-                        t.start()
-                        st.rerun()
-                
-                # DOWNLOAD
-                if status == "Completed":
-                    c3.download_button("📥 Text", content, file_name=f"{topic}.md")
-                
-                # AUDIO
-                if status == "Completed":
-                    # State 1: Ready to Generate
-                    if not aud_stat or aud_stat == "None" or aud_stat == "Error":
-                        if c4.button("🎧 Generate Audio", key=f"au_gen_{cid}"):
-                            # Start Background Thread
-                            t = threading.Thread(target=background_audio_task, args=(cid, content))
-                            t.start()
-                            st.rerun()
-                    
-                    # State 2: Processing (Polling)
-                    elif aud_stat == "Processing":
-                        c4.info("🎙️ " + (aud_msg if aud_msg else "Initializing..."))
-                        time.sleep(3) # Poll DB every 3s
-                        st.rerun()
-                        
-                    # State 3: Done (Show Player)
-                    elif aud_stat == "Completed" and aud_data:
-                        c4.audio(bytes(aud_data), format='audio/mp3')
-                        # Optional: Allow re-generation
-                        if c4.button("🔄 Regenerate Audio", key=f"au_regen_{cid}"):
-                             t = threading.Thread(target=background_audio_task, args=(cid, content))
-                             t.start()
-                             st.rerun()
-
-    else:
-        st.info("Select a book from the sidebar.")
-
-    cur.close()
-    conn.close()
-
-if __name__ == "__main__":
-    main()
+    st.sidebar
