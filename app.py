@@ -13,7 +13,7 @@ from pydub.effects import normalize
 import io
 
 # ------------------------------------------------------------------
-# 1. INITIALIZATION (MUST BE FIRST)
+# 1. INITIALIZATION
 # ------------------------------------------------------------------
 st.set_page_config(page_title="The Newsroom", page_icon="🏛️", layout="wide")
 
@@ -91,7 +91,7 @@ def split_text_safe(text, max_chars=2500):
     return chunks
 
 # ------------------------------------------------------------------
-# 4. AGENTS (FOREGROUND)
+# 4. AGENTS
 # ------------------------------------------------------------------
 def generate_blueprint(topic, briefing):
     with st.spinner("Architect researching..."):
@@ -148,9 +148,6 @@ def run_cartographer_task(chapter_id, book_id, content):
         print(e)
         return 0, 0
 
-# ------------------------------------------------------------------
-# DB UPDATERS
-# ------------------------------------------------------------------
 def update_status(cid, status, text=None):
     try:
         conn = get_db_connection()
@@ -177,7 +174,7 @@ def update_audio_status(cid, status, msg=None, data=None):
         print(f"Audio DB Error: {e}")
 
 # ------------------------------------------------------------------
-# WORKER: TEXT WRITER (BACKGROUND)
+# WORKER: TEXT WRITER
 # ------------------------------------------------------------------
 def background_writer_task(chapter_id, topic, book_title):
     try:
@@ -246,7 +243,7 @@ def background_writer_task(chapter_id, topic, book_title):
         update_status(chapter_id, "Error")
 
 # ------------------------------------------------------------------
-# WORKER: AUDIO ENGINEER (BACKGROUND)
+# WORKER: AUDIO ENGINEER (FIXED)
 # ------------------------------------------------------------------
 def background_audio_task(chapter_id, text, voice="Puck"):
     try:
@@ -260,28 +257,41 @@ def background_audio_task(chapter_id, text, voice="Puck"):
         combined_audio = AudioSegment.empty()
         
         for i, chunk in enumerate(chunks):
-            # Update DB (NO st.* calls here)
             update_audio_status(chapter_id, "Processing", msg=f"Generating segment {i+1}/{len(chunks)}")
             
             try:
-                # Fallback logic if 2.5 TTS fails
-                try:
-                    model_id = "gemini-2.0-flash-exp" # Known working audio model
-                    res = client.models.generate_content(
-                        model=model_id,
-                        contents=f"Read this text naturally:\n\n{chunk}",
-                        config=types.GenerateContentConfig(
-                            response_modalities=["AUDIO"],
-                            speech_config=types.SpeechConfig(
-                                voice_config=types.VoiceConfig(
-                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
-                                )
+                # FIX: Disable Safety Settings to prevent 400 Errors on History
+                res = client.models.generate_content(
+                    model="gemini-2.0-flash-exp", # 2.0 Flash Exp handles Audio Best
+                    contents=chunk, # Send JUST the text, no instruction wrapper
+                    config=types.GenerateContentConfig(
+                        response_modalities=["AUDIO"],
+                        speech_config=types.SpeechConfig(
+                            voice_config=types.VoiceConfig(
+                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
                             )
-                        )
+                        ),
+                        # Disable Safety Filters
+                        safety_settings=[
+                            types.SafetySetting(
+                                category="HARM_CATEGORY_HATE_SPEECH",
+                                threshold="BLOCK_NONE"
+                            ),
+                            types.SafetySetting(
+                                category="HARM_CATEGORY_DANGEROUS_CONTENT",
+                                threshold="BLOCK_NONE"
+                            ),
+                            types.SafetySetting(
+                                category="HARM_CATEGORY_HARASSMENT",
+                                threshold="BLOCK_NONE"
+                            ),
+                            types.SafetySetting(
+                                category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                                threshold="BLOCK_NONE"
+                            ),
+                        ]
                     )
-                except Exception as model_err:
-                    # Just fail fast if model doesn't exist/work
-                    raise ValueError(f"Model Error: {model_err}")
+                )
 
                 if res.candidates and res.candidates[0].content.parts:
                     part = res.candidates[0].content.parts[0]
@@ -292,11 +302,14 @@ def background_audio_task(chapter_id, text, voice="Puck"):
                         else: combined_audio = combined_audio.append(seg, crossfade=100)
                     else:
                         raise ValueError("No inline audio data")
+                else:
+                    raise ValueError("Empty response")
                 
                 time.sleep(2)
                 
             except Exception as e:
-                update_audio_status(chapter_id, "Error", msg=f"Err Seg {i+1}: {str(e)[:30]}")
+                # Log FULL error to DB
+                update_audio_status(chapter_id, "Error", msg=f"Err Seg {i+1}: {str(e)}")
                 return
         
         if len(combined_audio) > 0:
@@ -308,7 +321,7 @@ def background_audio_task(chapter_id, text, voice="Puck"):
             update_audio_status(chapter_id, "Error", msg="No audio generated.")
 
     except Exception as e:
-        update_audio_status(chapter_id, "Error", msg=f"Crit: {str(e)[:30]}")
+        update_audio_status(chapter_id, "Error", msg=f"Crit: {str(e)}")
 
 # ------------------------------------------------------------------
 # 5. UI MAIN LOOP
