@@ -107,8 +107,9 @@ def generate_blueprint(topic, briefing):
     with st.spinner("Architect drafting..."):
         prompt = f"Create a book TOC (JSON list of objects with keys 'topic', 'content').\nTopic: {topic}\nBrief: {briefing}\nContext: {dossier}"
         try:
+            # Standard Text Model for Logic
             res = client.models.generate_content(
-                model="gemini-2.5-flash", 
+                model="gemini-2.5-flash-preview", 
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
@@ -121,7 +122,7 @@ def run_cartographer_task(chapter_id, book_id, content):
     try:
         prompt = "Extract JSON: {'characters': [{'name','role','description'}], 'timeline': [{'character_name','location','start_date','end_date'}]}.\nTEXT: " + content[:30000]
         res = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flash-preview",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -212,7 +213,7 @@ def background_writer_task(chapter_id, topic, book_title):
 
         plan_prompt = f"Outline subtopics (JSON list of strings).\nCONTEXT: {MASTER[:50000]}"
         try:
-            res = client.models.generate_content(model="gemini-2.5-flash", contents=plan_prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
+            res = client.models.generate_content(model="gemini-2.5-flash-preview", contents=plan_prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
             subtopics = json.loads(res.text)
             if isinstance(subtopics, dict): subtopics = list(subtopics.values())[0]
         except: subtopics = ["Part 1", "Part 2", "Part 3"]
@@ -230,7 +231,7 @@ def background_writer_task(chapter_id, topic, book_title):
             CONTEXT: {MASTER[:100000]}
             """
             try:
-                w_res = client.models.generate_content(model="gemini-2.5-flash", contents=wp, config=types.GenerateContentConfig(response_mime_type="application/json"))
+                w_res = client.models.generate_content(model="gemini-2.5-flash-preview", contents=wp, config=types.GenerateContentConfig(response_mime_type="application/json"))
                 wd = json.loads(w_res.text)
                 narrative += f"## {sub}\n{wd.get('text','')}\n\n"
                 prev_sum = wd.get('summary','')
@@ -242,7 +243,7 @@ def background_writer_task(chapter_id, topic, book_title):
         update_status(chapter_id, "Error")
 
 # ------------------------------------------------------------------
-# WORKER: AUDIO ENGINEER
+# WORKER: AUDIO ENGINEER (FIXED MODEL NAME)
 # ------------------------------------------------------------------
 def background_audio_task(chapter_id, text, voice="Puck"):
     try:
@@ -259,11 +260,10 @@ def background_audio_task(chapter_id, text, voice="Puck"):
             update_audio_status(chapter_id, "Processing", msg=f"Generating segment {i+1}/{len(chunks)}")
             
             try:
-                # Primary Attempt: 2.0 Flash Exp
-                # We remove safety settings to prevent 400 on History topics
+                # CRITICAL FIX: Using the user-verified model name
                 res = client.models.generate_content(
-                    model="gemini-2.0-flash-exp",
-                    contents=chunk, 
+                    model="gemini-2.5-flash-preview-tts", 
+                    contents=chunk,
                     config=types.GenerateContentConfig(
                         response_modalities=["AUDIO"],
                         speech_config=types.SpeechConfig(
@@ -286,12 +286,11 @@ def background_audio_task(chapter_id, text, voice="Puck"):
                 else:
                     raise ValueError("Empty response")
                 
-                time.sleep(2)
+                time.sleep(2) # Rate limit safety
                 
             except Exception as e:
-                # NO TRUNCATION: We capture the full error now
-                full_err = str(e)
-                update_audio_status(chapter_id, "Error", msg=f"⚠️ DEBUG: {full_err}")
+                # Capture full error
+                update_audio_status(chapter_id, "Error", msg=f"Err Seg {i+1}: {str(e)}")
                 return
         
         if len(combined_audio) > 0:
@@ -303,7 +302,7 @@ def background_audio_task(chapter_id, text, voice="Puck"):
             update_audio_status(chapter_id, "Error", msg="No audio generated.")
 
     except Exception as e:
-        update_audio_status(chapter_id, "Error", msg=f"CRITICAL: {str(e)}")
+        update_audio_status(chapter_id, "Error", msg=f"Crit: {str(e)}")
 
 # ------------------------------------------------------------------
 # 5. UI MAIN LOOP
