@@ -9,7 +9,7 @@ from google import genai
 from google.genai import types
 from exa_py import Exa
 from pydub import AudioSegment
-from pydub.effects import normalize  # Added for audio mastering
+from pydub.effects import normalize
 import io
 
 # ------------------------------------------------------------------
@@ -61,24 +61,17 @@ run_schema_check()
 # 3. HELPER: SMART TEXT SPLITTER
 # ------------------------------------------------------------------
 def split_text_safe(text, max_chars=2500):
-    if len(text) <= max_chars:
-        return [text]
-    
+    if len(text) <= max_chars: return [text]
     chunks = []
-    current_chunk = ""
+    current = ""
+    # Split by sentence to avoid cutting words in audio
     sentences = text.replace("! ", "!|").replace("? ", "?|").replace(". ", ".|").split("|")
-    
-    for sentence in sentences:
-        if len(current_chunk) + len(sentence) < max_chars:
-            current_chunk += sentence + " "
+    for s in sentences:
+        if len(current) + len(s) < max_chars: current += s + " "
         else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence + " "
-            
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-        
+            if current: chunks.append(current.strip())
+            current = s + " "
+    if current: chunks.append(current.strip())
     return chunks
 
 # ------------------------------------------------------------------
@@ -89,8 +82,7 @@ def generate_blueprint(topic, briefing):
         query = f"{topic}: {briefing}"
         try:
             search = exa.search_and_contents(query, num_results=10, text=True)
-        except:
-            return []
+        except: return []
         
         dossier = ""
         for r in search.results:
@@ -100,30 +92,30 @@ def generate_blueprint(topic, briefing):
     with st.spinner("Architect drafting..."):
         prompt = f"Create a book TOC (JSON list of objects with keys 'topic', 'content').\nTopic: {topic}\nBrief: {briefing}\nContext: {dossier}"
         try:
+            # Using standard Gemini 2.5 Flash for Text Logic
             res = client.models.generate_content(
-                model="gemini-2.0-flash-exp",
+                model="gemini-2.5-flash", 
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
             data = json.loads(res.text)
             if isinstance(data, dict): return data.get("chapters", list(data.values())[0])
             return data
-        except:
-            return []
+        except: return []
 
 def generate_audio_chapter(text, voice="Puck"):
     if not text or len(text) < 10: return None
-
     chunks = split_text_safe(text, max_chars=2500)
     combined_audio = AudioSegment.empty()
-    
     prog_bar = st.progress(0)
     
     with st.spinner(f"Generating Audio ({len(chunks)} segments)..."):
         for i, chunk in enumerate(chunks):
             try:
+                # CRITICAL FIX: Use the dedicated TTS model
+                # This model supports "Puck", "Kore", etc. natively
                 res = client.models.generate_content(
-                    model="gemini-2.0-flash-exp",
+                    model="gemini-2.5-flash-tts", 
                     contents=f"Read this text naturally:\n\n{chunk}",
                     config=types.GenerateContentConfig(
                         response_modalities=["AUDIO"],
@@ -138,49 +130,36 @@ def generate_audio_chapter(text, voice="Puck"):
                 if res.candidates and res.candidates[0].content.parts:
                     part = res.candidates[0].content.parts[0]
                     if part.inline_data:
-                        # Load Raw PCM
-                        seg = AudioSegment(
-                            data=part.inline_data.data, 
-                            sample_width=2, 
-                            frame_rate=24000, 
-                            channels=1
-                        )
-                        
-                        # FIX 1: Normalize individual chunk volume to prevent jumps
+                        # Normalize each chunk before stitching
+                        seg = AudioSegment(data=part.inline_data.data, sample_width=2, frame_rate=24000, channels=1)
                         seg = normalize(seg)
-
-                        if i == 0: 
-                            combined_audio = seg
-                        else: 
-                            # FIX 2: Crossfade to remove "ticking" (100ms overlap)
-                            combined_audio = combined_audio.append(seg, crossfade=100)
+                        if i == 0: combined_audio = seg
+                        else: combined_audio = combined_audio.append(seg, crossfade=100)
                 
                 prog_bar.progress((i + 1) / len(chunks))
-                time.sleep(2) # Rate limit safety
+                time.sleep(1) # Brief pause for stability
                 
             except Exception as e:
                 st.error(f"Error on segment {i+1}: {e}")
                 return None
             
-    # FIX 3: Final Mastering (Normalize entire track)
     if len(combined_audio) > 0:
+        # Final Master
         combined_audio = normalize(combined_audio)
         buf = io.BytesIO()
         combined_audio.export(buf, format="mp3")
         return buf
-    
     return None
 
 def run_cartographer_task(chapter_id, book_id, content):
     try:
         prompt = "Extract JSON: {'characters': [{'name','role','description'}], 'timeline': [{'character_name','location','start_date','end_date'}]}.\nTEXT: " + content[:30000]
         res = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         data = json.loads(res.text)
-        
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -250,8 +229,8 @@ def background_writer_task(chapter_id, topic, book_title):
 
         plan_prompt = f"Outline subtopics (JSON list of strings).\nCONTEXT: {MASTER[:50000]}"
         try:
-            plan_res = client.models.generate_content(model="gemini-2.0-flash-exp", contents=plan_prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
-            subtopics = json.loads(plan_res.text)
+            res = client.models.generate_content(model="gemini-2.5-flash", contents=plan_prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
+            subtopics = json.loads(res.text)
             if isinstance(subtopics, dict): subtopics = list(subtopics.values())[0]
         except: subtopics = ["Part 1", "Part 2", "Part 3"]
 
@@ -268,7 +247,7 @@ def background_writer_task(chapter_id, topic, book_title):
             CONTEXT: {MASTER[:100000]}
             """
             try:
-                w_res = client.models.generate_content(model="gemini-2.0-flash-exp", contents=wp, config=types.GenerateContentConfig(response_mime_type="application/json"))
+                w_res = client.models.generate_content(model="gemini-2.5-flash", contents=wp, config=types.GenerateContentConfig(response_mime_type="application/json"))
                 wd = json.loads(w_res.text)
                 narrative += f"## {sub}\n{wd.get('text','')}\n\n"
                 prev_sum = wd.get('summary','')
