@@ -13,7 +13,7 @@ from pydub.effects import normalize
 import io
 
 # ------------------------------------------------------------------
-# 1. INITIALIZATION
+# 1. INITIALIZATION (MUST BE FIRST)
 # ------------------------------------------------------------------
 st.set_page_config(page_title="The Newsroom", page_icon="🏛️", layout="wide")
 
@@ -91,7 +91,7 @@ def split_text_safe(text, max_chars=2500):
     return chunks
 
 # ------------------------------------------------------------------
-# 4. AGENTS
+# 4. AGENTS (FOREGROUND)
 # ------------------------------------------------------------------
 def generate_blueprint(topic, briefing):
     with st.spinner("Architect researching..."):
@@ -148,6 +148,9 @@ def run_cartographer_task(chapter_id, book_id, content):
         print(e)
         return 0, 0
 
+# ------------------------------------------------------------------
+# DB UPDATERS
+# ------------------------------------------------------------------
 def update_status(cid, status, text=None):
     try:
         conn = get_db_connection()
@@ -174,7 +177,7 @@ def update_audio_status(cid, status, msg=None, data=None):
         print(f"Audio DB Error: {e}")
 
 # ------------------------------------------------------------------
-# WORKER: TEXT WRITER
+# WORKER: TEXT WRITER (BACKGROUND)
 # ------------------------------------------------------------------
 def background_writer_task(chapter_id, topic, book_title):
     try:
@@ -243,11 +246,11 @@ def background_writer_task(chapter_id, topic, book_title):
         update_status(chapter_id, "Error")
 
 # ------------------------------------------------------------------
-# WORKER: AUDIO ENGINEER (FAIL-FAST VERSION)
+# WORKER: AUDIO ENGINEER (BACKGROUND)
 # ------------------------------------------------------------------
 def background_audio_task(chapter_id, text, voice="Puck"):
     try:
-        update_audio_status(chapter_id, "Processing", msg="Initializing Audio Engine...")
+        update_audio_status(chapter_id, "Processing", msg="Initializing...")
         
         if not text or len(text) < 10:
             update_audio_status(chapter_id, "Error", msg="Text too short.")
@@ -257,14 +260,15 @@ def background_audio_task(chapter_id, text, voice="Puck"):
         combined_audio = AudioSegment.empty()
         
         for i, chunk in enumerate(chunks):
-            update_audio_status(chapter_id, "Processing", msg=f"Generating segment {i+1} of {len(chunks)}...")
+            # Update DB (NO st.* calls here)
+            update_audio_status(chapter_id, "Processing", msg=f"Generating segment {i+1}/{len(chunks)}")
             
             try:
-                # Primary Attempt: 2.0 Flash Exp
-                model_name = "gemini-2.0-flash-exp"
+                # Fallback logic if 2.5 TTS fails
                 try:
+                    model_id = "gemini-2.0-flash-exp" # Known working audio model
                     res = client.models.generate_content(
-                        model=model_name,
+                        model=model_id,
                         contents=f"Read this text naturally:\n\n{chunk}",
                         config=types.GenerateContentConfig(
                             response_modalities=["AUDIO"],
@@ -275,21 +279,9 @@ def background_audio_task(chapter_id, text, voice="Puck"):
                             )
                         )
                     )
-                except Exception:
-                    # Fallback Attempt: 2.0 Flash (Stable)
-                    model_name = "gemini-2.0-flash"
-                    res = client.models.generate_content(
-                        model=model_name,
-                        contents=f"Read this text naturally:\n\n{chunk}",
-                        config=types.GenerateContentConfig(
-                            response_modalities=["AUDIO"],
-                            speech_config=types.SpeechConfig(
-                                voice_config=types.VoiceConfig(
-                                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
-                                )
-                            )
-                        )
-                    )
+                except Exception as model_err:
+                    # Just fail fast if model doesn't exist/work
+                    raise ValueError(f"Model Error: {model_err}")
 
                 if res.candidates and res.candidates[0].content.parts:
                     part = res.candidates[0].content.parts[0]
@@ -299,17 +291,13 @@ def background_audio_task(chapter_id, text, voice="Puck"):
                         if i == 0: combined_audio = seg
                         else: combined_audio = combined_audio.append(seg, crossfade=100)
                     else:
-                        raise ValueError("No inline_data received from API")
-                else:
-                    raise ValueError("Empty candidate response from API")
+                        raise ValueError("No inline audio data")
                 
-                time.sleep(2) 
+                time.sleep(2)
                 
             except Exception as e:
-                # FAIL FAST: Report the exact error to DB and Stop
-                error_msg = f"API Error on Chunk {i+1}: {str(e)}"
-                update_audio_status(chapter_id, "Error", msg=error_msg)
-                return 
+                update_audio_status(chapter_id, "Error", msg=f"Err Seg {i+1}: {str(e)[:30]}")
+                return
         
         if len(combined_audio) > 0:
             combined_audio = normalize(combined_audio)
@@ -320,7 +308,7 @@ def background_audio_task(chapter_id, text, voice="Puck"):
             update_audio_status(chapter_id, "Error", msg="No audio generated.")
 
     except Exception as e:
-        update_audio_status(chapter_id, "Error", msg=f"Critical: {str(e)[:100]}")
+        update_audio_status(chapter_id, "Error", msg=f"Crit: {str(e)[:30]}")
 
 # ------------------------------------------------------------------
 # 5. UI MAIN LOOP
@@ -354,4 +342,85 @@ def main():
                 st.session_state['sel_title'] = new_t
                 st.rerun()
 
-    st.sidebar
+    st.sidebar.divider()
+    
+    for bid, title in books:
+        c1, c2 = st.sidebar.columns([4,1])
+        lbl = f"📂 {title}" if st.session_state['sel_bid'] == bid else f"📄 {title}"
+        if c1.button(lbl, key=f"open_{bid}"):
+            st.session_state['sel_bid'] = bid
+            st.session_state['sel_title'] = title
+            st.rerun()
+        if c2.button("🗑️", key=f"del_{bid}"):
+            cur.execute("DELETE FROM books WHERE id=%s", (bid,))
+            conn.commit()
+            st.rerun()
+
+    if st.session_state['sel_bid']:
+        st.header(f"📖 {st.session_state['sel_title']}")
+        cur.execute("SELECT id, topic, status, content, audio_status, audio_msg, audio_data FROM book_chapters WHERE book_id=%s ORDER BY id", (st.session_state['sel_bid'],))
+        chapters = cur.fetchall()
+        
+        if not chapters: st.info("No chapters.")
+        
+        for cid, topic, status, content, aud_stat, aud_msg, aud_data in chapters:
+            with st.expander(f"{topic} [{status}]"):
+                if status == "Draft":
+                    st.caption("Outline:")
+                    st.write(content)
+                elif status == "Processing":
+                    st.info("AI writing...")
+                    st.progress(50)
+                    time.sleep(3)
+                    st.rerun()
+                elif status == "Completed":
+                    st.markdown(content[:500]+"...")
+                
+                st.divider()
+                c1, c2, c3, c4 = st.columns(4)
+                
+                if status == "Draft":
+                    if c1.button("🗺️ Map Plan", key=f"map_{cid}"):
+                        with st.spinner("Mapping..."):
+                            nc, ne = run_cartographer_task(cid, st.session_state['sel_bid'], content)
+                            st.success(f"Mapped {nc} chars, {ne} events")
+                
+                if status in ["Draft", "Error"]:
+                    if c2.button("✍️ Write", key=f"wr_{cid}"):
+                        t = threading.Thread(target=background_writer_task, args=(cid, topic, st.session_state['sel_title']))
+                        t.start()
+                        st.rerun()
+                
+                if status == "Completed":
+                    c3.download_button("📥 Text", content, file_name=f"{topic}.md")
+                
+                if status == "Completed":
+                    if not aud_stat or aud_stat == "None":
+                        if c4.button("🎧 Gen Audio", key=f"au_{cid}"):
+                            t = threading.Thread(target=background_audio_task, args=(cid, content))
+                            t.start()
+                            st.rerun()
+                    elif aud_stat == "Processing":
+                        c4.info(f"🎙️ {aud_msg}")
+                        time.sleep(2)
+                        st.rerun()
+                    elif aud_stat == "Completed" and aud_data:
+                        c4.audio(bytes(aud_data), format='audio/mp3')
+                        if c4.button("🔄 Reset", key=f"rst_{cid}"):
+                            update_audio_status(cid, "None")
+                            st.rerun()
+                    elif aud_stat == "Error":
+                        c4.error(f"{aud_msg}")
+                        if c4.button("🔄 Retry", key=f"rty_{cid}"):
+                            t = threading.Thread(target=background_audio_task, args=(cid, content))
+                            t.start()
+                            st.rerun()
+
+    else:
+        st.info("Select a book from the sidebar.")
+
+    cur.close()
+    conn.close()
+
+if __name__ == "__main__":
+    main()
