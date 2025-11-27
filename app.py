@@ -9,6 +9,7 @@ from google import genai
 from google.genai import types
 from exa_py import Exa
 from pydub import AudioSegment
+from pydub.effects import normalize  # Added for audio mastering
 import io
 
 # ------------------------------------------------------------------
@@ -57,7 +58,31 @@ def run_schema_check():
 run_schema_check()
 
 # ------------------------------------------------------------------
-# 3. AGENTS
+# 3. HELPER: SMART TEXT SPLITTER
+# ------------------------------------------------------------------
+def split_text_safe(text, max_chars=2500):
+    if len(text) <= max_chars:
+        return [text]
+    
+    chunks = []
+    current_chunk = ""
+    sentences = text.replace("! ", "!|").replace("? ", "?|").replace(". ", ".|").split("|")
+    
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) < max_chars:
+            current_chunk += sentence + " "
+        else:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence + " "
+            
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+        
+    return chunks
+
+# ------------------------------------------------------------------
+# 4. AGENTS
 # ------------------------------------------------------------------
 def generate_blueprint(topic, briefing):
     with st.spinner("Architect researching..."):
@@ -87,22 +112,19 @@ def generate_blueprint(topic, briefing):
             return []
 
 def generate_audio_chapter(text, voice="Puck"):
-    # DEBUG: Check if text exists
-    if not text or len(text) < 10:
-        st.error("Text content too short to generate audio.")
-        return None
+    if not text or len(text) < 10: return None
 
-    chunk_size = 2000
-    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-    audio = AudioSegment.empty()
+    chunks = split_text_safe(text, max_chars=2500)
+    combined_audio = AudioSegment.empty()
     
-    with st.spinner(f"Generating Audio ({len(chunks)} chunks)..."):
+    prog_bar = st.progress(0)
+    
+    with st.spinner(f"Generating Audio ({len(chunks)} segments)..."):
         for i, chunk in enumerate(chunks):
             try:
-                # Call Gemini 2.0 Flash for Audio
                 res = client.models.generate_content(
                     model="gemini-2.0-flash-exp",
-                    contents=f"Read this text clearly and naturally:\n\n{chunk}",
+                    contents=f"Read this text naturally:\n\n{chunk}",
                     config=types.GenerateContentConfig(
                         response_modalities=["AUDIO"],
                         speech_config=types.SpeechConfig(
@@ -113,45 +135,41 @@ def generate_audio_chapter(text, voice="Puck"):
                     )
                 )
                 
-                # Check if we actually got audio data back
-                if not res.candidates or not res.candidates[0].content.parts:
-                    st.warning(f"Chunk {i}: No content returned from Gemini.")
-                    continue
-                    
-                part = res.candidates[0].content.parts[0]
-                if not part.inline_data:
-                    st.warning(f"Chunk {i}: No inline_data in response.")
-                    continue
+                if res.candidates and res.candidates[0].content.parts:
+                    part = res.candidates[0].content.parts[0]
+                    if part.inline_data:
+                        # Load Raw PCM
+                        seg = AudioSegment(
+                            data=part.inline_data.data, 
+                            sample_width=2, 
+                            frame_rate=24000, 
+                            channels=1
+                        )
+                        
+                        # FIX 1: Normalize individual chunk volume to prevent jumps
+                        seg = normalize(seg)
 
-                # Process Audio with Pydub
-                # Gemini sends: 24kHz, 1 channel, 16-bit PCM
-                seg = AudioSegment(
-                    data=part.inline_data.data, 
-                    sample_width=2, 
-                    frame_rate=24000, 
-                    channels=1
-                )
+                        if i == 0: 
+                            combined_audio = seg
+                        else: 
+                            # FIX 2: Crossfade to remove "ticking" (100ms overlap)
+                            combined_audio = combined_audio.append(seg, crossfade=100)
                 
-                if i == 0: 
-                    audio = seg
-                else: 
-                    audio = audio.append(seg, crossfade=100)
-                    
+                prog_bar.progress((i + 1) / len(chunks))
+                time.sleep(2) # Rate limit safety
+                
             except Exception as e:
-                st.error(f"Error generating Chunk {i}: {str(e)}")
-                # If specific error is FFmpeg related, give hint
-                if "ffmpeg" in str(e).lower():
-                    st.error("System Dependency Error: FFmpeg not found. Please run 'sudo apt-get install ffmpeg' on the server.")
+                st.error(f"Error on segment {i+1}: {e}")
                 return None
             
-    # Final Check
-    if len(audio) == 0:
-        st.error("Audio generation failed: No audio data accumulated.")
-        return None
-
-    buf = io.BytesIO()
-    audio.export(buf, format="mp3")
-    return buf
+    # FIX 3: Final Mastering (Normalize entire track)
+    if len(combined_audio) > 0:
+        combined_audio = normalize(combined_audio)
+        buf = io.BytesIO()
+        combined_audio.export(buf, format="mp3")
+        return buf
+    
+    return None
 
 def run_cartographer_task(chapter_id, book_id, content):
     try:
@@ -213,7 +231,6 @@ def background_writer_task(chapter_id, topic, book_title):
         cur.close()
         conn.close()
 
-        # Research
         full_research = ""
         try:
             safe_q = f"{topic}: {summary}".replace("{","").replace("}","")
@@ -223,7 +240,6 @@ def background_writer_task(chapter_id, topic, book_title):
                 full_research += f"\nSOURCE {i+1}: {r.title}\n{txt}\n"
         except: full_research = "No Exa results."
 
-        # System Prompt
         SYSTEM_PROMPT = """
         ROLE: You are a master subject matter expert and a world-class storyteller.
         GOAL: Write a verbose, detailed, and exhaustive narrative based on the data provided.
@@ -232,7 +248,6 @@ def background_writer_task(chapter_id, topic, book_title):
 
         MASTER = f"{SYSTEM_PROMPT}\n\nBOOK: {book_title}\nCHAPTER: {topic}\nSUMMARY: {summary}\nCHARS: {chars}\nEVENTS: {events}\nRESEARCH: {full_research[:200000]}"
 
-        # Planning
         plan_prompt = f"Outline subtopics (JSON list of strings).\nCONTEXT: {MASTER[:50000]}"
         try:
             plan_res = client.models.generate_content(model="gemini-2.0-flash-exp", contents=plan_prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
@@ -240,7 +255,6 @@ def background_writer_task(chapter_id, topic, book_title):
             if isinstance(subtopics, dict): subtopics = list(subtopics.values())[0]
         except: subtopics = ["Part 1", "Part 2", "Part 3"]
 
-        # Writing Loop
         narrative = f"# {topic}\n\n"
         prev_sum = "Start."
         
@@ -266,7 +280,7 @@ def background_writer_task(chapter_id, topic, book_title):
         update_status(chapter_id, "Error")
 
 # ------------------------------------------------------------------
-# 4. UI MAIN LOOP
+# 5. UI MAIN LOOP
 # ------------------------------------------------------------------
 def main():
     st.sidebar.header("Library")
@@ -334,31 +348,25 @@ def main():
                 st.divider()
                 c1, c2, c3, c4 = st.columns(4)
                 
-                # 1. Map (Draft Only)
                 if status == "Draft":
                     if c1.button("🗺️ Map Plan", key=f"map_{cid}"):
                         with st.spinner("Mapping..."):
                             nc, ne = run_cartographer_task(cid, st.session_state['sel_bid'], content)
                             st.success(f"Mapped {nc} chars, {ne} events")
                 
-                # 2. Write (Draft Only)
                 if status in ["Draft", "Error"]:
                     if c2.button("✍️ Write", key=f"wr_{cid}"):
                         t = threading.Thread(target=background_writer_task, args=(cid, topic, st.session_state['sel_title']))
                         t.start()
                         st.rerun()
                 
-                # 3. Download (Completed)
                 if status == "Completed":
                     c3.download_button("📥 Text", content, file_name=f"{topic}.md")
                 
-                # 4. Audio (Completed)
                 if status == "Completed":
                     if c4.button("🎧 Audio", key=f"au_{cid}"):
-                        # Added check for None return
                         aud = generate_audio_chapter(content)
-                        if aud:
-                            st.audio(aud, format='audio/mp3')
+                        if aud: st.audio(aud, format='audio/mp3')
 
     else:
         st.info("Select a book from the sidebar.")
