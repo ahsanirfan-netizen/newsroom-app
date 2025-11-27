@@ -259,23 +259,18 @@ def background_audio_task(chapter_id, text, voice="Puck"):
             update_audio_status(chapter_id, "Processing", msg=f"Generating segment {i+1}/{len(chunks)}")
             
             try:
+                # Primary Attempt: 2.0 Flash Exp
+                # We remove safety settings to prevent 400 on History topics
                 res = client.models.generate_content(
                     model="gemini-2.0-flash-exp",
-                    contents=chunk, # Sending RAW text only (no wrapper instructions)
+                    contents=chunk, 
                     config=types.GenerateContentConfig(
                         response_modalities=["AUDIO"],
                         speech_config=types.SpeechConfig(
                             voice_config=types.VoiceConfig(
                                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
                             )
-                        ),
-                        # Disable Safety Filters to prevent 400 on History content
-                        safety_settings=[
-                            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                        ]
+                        )
                     )
                 )
 
@@ -294,8 +289,9 @@ def background_audio_task(chapter_id, text, voice="Puck"):
                 time.sleep(2)
                 
             except Exception as e:
-                # FULL ERROR MESSAGE (NO TRUNCATION)
-                update_audio_status(chapter_id, "Error", msg=f"Err Seg {i+1}: {str(e)}")
+                # NO TRUNCATION: We capture the full error now
+                full_err = str(e)
+                update_audio_status(chapter_id, "Error", msg=f"⚠️ DEBUG: {full_err}")
                 return
         
         if len(combined_audio) > 0:
@@ -307,8 +303,7 @@ def background_audio_task(chapter_id, text, voice="Puck"):
             update_audio_status(chapter_id, "Error", msg="No audio generated.")
 
     except Exception as e:
-        # FULL ERROR MESSAGE
-        update_audio_status(chapter_id, "Error", msg=f"Crit: {str(e)}")
+        update_audio_status(chapter_id, "Error", msg=f"CRITICAL: {str(e)}")
 
 # ------------------------------------------------------------------
 # 5. UI MAIN LOOP
