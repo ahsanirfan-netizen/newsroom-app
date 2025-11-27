@@ -43,7 +43,6 @@ def run_schema_check():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # Create Tables if they don't exist
         cur.execute("CREATE TABLE IF NOT EXISTS books (id SERIAL PRIMARY KEY, title TEXT NOT NULL, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());")
         cur.execute("CREATE TABLE IF NOT EXISTS book_chapters (id SERIAL PRIMARY KEY, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE, topic TEXT NOT NULL, status TEXT DEFAULT 'Draft', content TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW());")
         cur.execute("CREATE TABLE IF NOT EXISTS characters (id SERIAL PRIMARY KEY, name TEXT NOT NULL, role TEXT, description TEXT, book_id INTEGER REFERENCES books(id) ON DELETE CASCADE);")
@@ -88,16 +87,22 @@ def generate_blueprint(topic, briefing):
             return []
 
 def generate_audio_chapter(text, voice="Puck"):
+    # DEBUG: Check if text exists
+    if not text or len(text) < 10:
+        st.error("Text content too short to generate audio.")
+        return None
+
     chunk_size = 2000
     chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
     audio = AudioSegment.empty()
     
-    with st.spinner("Generating Audio..."):
+    with st.spinner(f"Generating Audio ({len(chunks)} chunks)..."):
         for i, chunk in enumerate(chunks):
             try:
+                # Call Gemini 2.0 Flash for Audio
                 res = client.models.generate_content(
                     model="gemini-2.0-flash-exp",
-                    contents=f"Read naturally:\n{chunk}",
+                    contents=f"Read this text clearly and naturally:\n\n{chunk}",
                     config=types.GenerateContentConfig(
                         response_modalities=["AUDIO"],
                         speech_config=types.SpeechConfig(
@@ -107,12 +112,43 @@ def generate_audio_chapter(text, voice="Puck"):
                         )
                     )
                 )
-                if res.candidates[0].content.parts[0].inline_data:
-                    seg = AudioSegment(data=res.candidates[0].content.parts[0].inline_data.data, sample_width=2, frame_rate=24000, channels=1)
-                    if i == 0: audio = seg
-                    else: audio = audio.append(seg, crossfade=100)
-            except: pass
+                
+                # Check if we actually got audio data back
+                if not res.candidates or not res.candidates[0].content.parts:
+                    st.warning(f"Chunk {i}: No content returned from Gemini.")
+                    continue
+                    
+                part = res.candidates[0].content.parts[0]
+                if not part.inline_data:
+                    st.warning(f"Chunk {i}: No inline_data in response.")
+                    continue
+
+                # Process Audio with Pydub
+                # Gemini sends: 24kHz, 1 channel, 16-bit PCM
+                seg = AudioSegment(
+                    data=part.inline_data.data, 
+                    sample_width=2, 
+                    frame_rate=24000, 
+                    channels=1
+                )
+                
+                if i == 0: 
+                    audio = seg
+                else: 
+                    audio = audio.append(seg, crossfade=100)
+                    
+            except Exception as e:
+                st.error(f"Error generating Chunk {i}: {str(e)}")
+                # If specific error is FFmpeg related, give hint
+                if "ffmpeg" in str(e).lower():
+                    st.error("System Dependency Error: FFmpeg not found. Please run 'sudo apt-get install ffmpeg' on the server.")
+                return None
             
+    # Final Check
+    if len(audio) == 0:
+        st.error("Audio generation failed: No audio data accumulated.")
+        return None
+
     buf = io.BytesIO()
     audio.export(buf, format="mp3")
     return buf
@@ -187,14 +223,13 @@ def background_writer_task(chapter_id, topic, book_title):
                 full_research += f"\nSOURCE {i+1}: {r.title}\n{txt}\n"
         except: full_research = "No Exa results."
 
-        # 1. DEFINE THE PERSONA & SYSTEM PROMPT
+        # System Prompt
         SYSTEM_PROMPT = """
         ROLE: You are a master subject matter expert and a world-class storyteller.
         GOAL: Write a verbose, detailed, and exhaustive narrative based on the data provided.
         STYLE: Extremely engaging, immersive, and expert-level. Do not summarize; dramatize and explain in depth.
         """
 
-        # 2. BUILD MASTER CONTEXT
         MASTER = f"{SYSTEM_PROMPT}\n\nBOOK: {book_title}\nCHAPTER: {topic}\nSUMMARY: {summary}\nCHARS: {chars}\nEVENTS: {events}\nRESEARCH: {full_research[:200000]}"
 
         # Planning
@@ -211,18 +246,13 @@ def background_writer_task(chapter_id, topic, book_title):
         
         for sub in subtopics:
             time.sleep(2)
-            
-            # Reinforce instruction in the loop prompt
             wp = f"""
             Using the SYSTEM PROMPT defined in context:
             Write 500-1000 words for Subtopic: {sub}
             Previous Context: {prev_sum}
-            
             JSON OUTPUT: {{'text': '...', 'summary': '...'}}
-            
             CONTEXT: {MASTER[:100000]}
             """
-            
             try:
                 w_res = client.models.generate_content(model="gemini-2.0-flash-exp", contents=wp, config=types.GenerateContentConfig(response_mime_type="application/json"))
                 wd = json.loads(w_res.text)
@@ -239,7 +269,6 @@ def background_writer_task(chapter_id, topic, book_title):
 # 4. UI MAIN LOOP
 # ------------------------------------------------------------------
 def main():
-    # Sidebar
     st.sidebar.header("Library")
     if 'sel_bid' not in st.session_state: st.session_state['sel_bid'] = None
     if 'sel_title' not in st.session_state: st.session_state['sel_title'] = ""
@@ -282,7 +311,6 @@ def main():
             conn.commit()
             st.rerun()
 
-    # Main Area
     if st.session_state['sel_bid']:
         st.header(f"📖 {st.session_state['sel_title']}")
         cur.execute("SELECT id, topic, status, content FROM book_chapters WHERE book_id=%s ORDER BY id", (st.session_state['sel_bid'],))
@@ -306,29 +334,31 @@ def main():
                 st.divider()
                 c1, c2, c3, c4 = st.columns(4)
                 
-                # Button 1: Map (Draft Only)
+                # 1. Map (Draft Only)
                 if status == "Draft":
                     if c1.button("🗺️ Map Plan", key=f"map_{cid}"):
                         with st.spinner("Mapping..."):
                             nc, ne = run_cartographer_task(cid, st.session_state['sel_bid'], content)
                             st.success(f"Mapped {nc} chars, {ne} events")
                 
-                # Button 2: Write (Draft Only)
+                # 2. Write (Draft Only)
                 if status in ["Draft", "Error"]:
                     if c2.button("✍️ Write", key=f"wr_{cid}"):
                         t = threading.Thread(target=background_writer_task, args=(cid, topic, st.session_state['sel_title']))
                         t.start()
                         st.rerun()
                 
-                # Button 3: Download (Completed)
+                # 3. Download (Completed)
                 if status == "Completed":
                     c3.download_button("📥 Text", content, file_name=f"{topic}.md")
                 
-                # Button 4: Audio (Completed)
+                # 4. Audio (Completed)
                 if status == "Completed":
                     if c4.button("🎧 Audio", key=f"au_{cid}"):
+                        # Added check for None return
                         aud = generate_audio_chapter(content)
-                        st.audio(aud, format='audio/mp3')
+                        if aud:
+                            st.audio(aud, format='audio/mp3')
 
     else:
         st.info("Select a book from the sidebar.")
