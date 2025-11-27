@@ -187,8 +187,15 @@ def background_writer_task(chapter_id, topic, book_title):
                 full_research += f"\nSOURCE {i+1}: {r.title}\n{txt}\n"
         except: full_research = "No Exa results."
 
-        # Master Context
-        MASTER = f"BOOK: {book_title}\nCHAPTER: {topic}\nSUMMARY: {summary}\nCHARS: {chars}\nEVENTS: {events}\nRESEARCH: {full_research[:200000]}"
+        # 1. DEFINE THE PERSONA & SYSTEM PROMPT
+        SYSTEM_PROMPT = """
+        ROLE: You are a master subject matter expert and a world-class storyteller.
+        GOAL: Write a verbose, detailed, and exhaustive narrative based on the data provided.
+        STYLE: Extremely engaging, immersive, and expert-level. Do not summarize; dramatize and explain in depth.
+        """
+
+        # 2. BUILD MASTER CONTEXT
+        MASTER = f"{SYSTEM_PROMPT}\n\nBOOK: {book_title}\nCHAPTER: {topic}\nSUMMARY: {summary}\nCHARS: {chars}\nEVENTS: {events}\nRESEARCH: {full_research[:200000]}"
 
         # Planning
         plan_prompt = f"Outline subtopics (JSON list of strings).\nCONTEXT: {MASTER[:50000]}"
@@ -204,7 +211,18 @@ def background_writer_task(chapter_id, topic, book_title):
         
         for sub in subtopics:
             time.sleep(2)
-            wp = f"Write 500 words. JSON: {{'text': '...', 'summary': '...'}}\nSubtopic: {sub}\nPrev: {prev_sum}\nContext: {MASTER[:100000]}"
+            
+            # Reinforce instruction in the loop prompt
+            wp = f"""
+            Using the SYSTEM PROMPT defined in context:
+            Write 500-1000 words for Subtopic: {sub}
+            Previous Context: {prev_sum}
+            
+            JSON OUTPUT: {{'text': '...', 'summary': '...'}}
+            
+            CONTEXT: {MASTER[:100000]}
+            """
+            
             try:
                 w_res = client.models.generate_content(model="gemini-2.0-flash-exp", contents=wp, config=types.GenerateContentConfig(response_mime_type="application/json"))
                 wd = json.loads(w_res.text)
